@@ -3,7 +3,6 @@ import pandas as pd
 import yfinance as yf
 import requests
 import re
-from io import StringIO
 
 # --------------------------------------------------
 #  CONFIG & CSS
@@ -31,142 +30,98 @@ div[data-testid="stExpander"] { background-color: rgba(255,255,255,0.02); border
 st.markdown('<h1 style="text-align:center; margin-bottom: 30px;">SEC 10-K ➜ DCF Model</h1>', unsafe_allow_html=True)
 
 # --------------------------------------------------
-#  LOGIC: HYBRID SCRAPER (Tables + Text Fallback)
+#  LOGIC: NUCLEAR TEXT-BLOB SCRAPER
 # --------------------------------------------------
 @st.cache_data(show_spinner=False)
-def fetch_text(url):
+def fetch_text_blob(url):
     try:
+        # 1. FIX THE URL (Handle iXBRL viewer)
+        # Converts /ix?doc=/Archives/... to https://www.sec.gov/Archives/...
+        if "ix?doc=" in url:
+            clean_path = url.split("doc=")[-1]
+            if clean_path.startswith("/"):
+                url = "https://www.sec.gov" + clean_path
+            else:
+                url = clean_path
+            
         headers = {'User-Agent': 'AnalystTool contact@admin.com'} 
-        return requests.get(url, headers=headers).text
+        html = requests.get(url, headers=headers).text
+        
+        # 2. NUCLEAR CLEANING (Destroy all HTML tags)
+        # We want a single stream of text to find "Revenue" then the next number.
+        text = html.replace('&nbsp;', ' ').replace('&#160;', ' ')
+        text = re.sub(r'<(script|style)[^>]*>.*?</\1>', ' ', text, flags=re.DOTALL) # Remove JS/CSS
+        text = re.sub(r'<[^>]+>', '   ', text) # Remove HTML tags
+        text = re.sub(r'\s+', ' ', text) # Collapse multiple spaces
+        
+        return text
     except:
         return ""
 
-def fix_ixbrl_url(url):
-    if "ix?doc=" in url:
-        clean = url.split("doc=")[-1]
-        return "https://www.sec.gov" + clean if clean.startswith("/") else clean
-    return url
-
-def clean_value(val):
-    """Parses numeric string to float. Returns None if invalid or a year."""
-    if isinstance(val, (int, float)):
-        if 1990 < val < 2030: return None
-        return float(val)
-    val = str(val).strip()
-    is_neg = '(' in val and ')' in val
-    clean = re.sub(r'[^\d\.]', '', val)
-    if not clean: return None
-    try:
-        num = float(clean)
-        # Avoid capturing years like 2023, 2024 as values
-        if 1990 < num < 2030 and num.is_integer(): return None
-        return -num if is_neg else num
-    except: return None
-
-# --- STRATEGY A: TABLE PARSING ---
-def parse_tables(html_text):
+def extract_from_blob(blob):
     data = {k: 0.0 for k in ['Revenue', 'EBIT', 'Depreciation', 'Capex', 'Debt', 'Cash']}
-    try:
-        dfs = pd.read_html(StringIO(html_text))
-    except:
-        return data
-
-    patterns = {
-        'Revenue': r'Net\s+Sales|Net\s+Revenue|Total\s+Revenues?|Revenue',
-        'EBIT': r'Operating\s+Income|Operating\s+Profit|Income\s+from\s+operations',
-        'Depreciation': r'Depreciation',
-        'Capex': r'Capital\s+expenditures|Additions\s+to\s+property',
-        'Debt': r'Total\s+Debt|Long-term\s+debt|Notes\s+payable',
-        'Cash': r'Cash\s+and\s+cash\s+equivalents'
-    }
     
-    for df in dfs:
-        if df.shape[1] < 2: continue
-        # Convert first 3 columns to string to check for labels (handles indentation)
-        # We fill NaNs so regex doesn't crash
-        df_str = df.astype(str).fillna("")
-        
-        for idx, row in df.iterrows():
-            # Check first 3 columns for the label
-            row_label = " ".join([str(row[i]) for i in range(min(3, len(row)))])
+    def find_near(keywords):
+        # Scan the text for the keywords
+        for kw in keywords:
+            # Find all start indices of the keyword
+            matches = [m.start() for m in re.finditer(re.escape(kw), blob, re.IGNORECASE)]
             
-            for key, pattern in patterns.items():
-                if data[key] == 0.0:
-                    if re.search(pattern, row_label, re.IGNORECASE):
-                        # Label found! Look for first valid number in remaining columns
-                        for col_val in row[1:]:
-                            val = clean_value(col_val)
-                            if val is not None:
-                                data[key] = val / 1000
-                                if key == 'Capex': data[key] = abs(data[key])
-                                break 
-    return data
-
-# --- STRATEGY B: RAW TEXT FALLBACK ---
-def parse_text_fallback(txt):
-    def find(pattern):
-        # Look for pattern followed by a number with commas
-        # Allows for messy HTML tags in between
-        regex = pattern + r'.{0,300}?>\s*\(?(\d{1,3}(?:,\d{3})+)\)?'
-        m = re.search(regex, txt, re.IGNORECASE | re.DOTALL)
-        if m:
-            try:
-                val = float(m.group(1).replace(',', ''))
-                if '(' in m.group(0) and ')' in m.group(0): val = -val
-                return val / 1000
-            except: pass
+            for pos in matches:
+                # Grab the chunk of text immediately following the keyword
+                snippet = blob[pos:pos+500]
+                
+                # Regex to find numbers: 123,456 or (123,456)
+                # Requires a comma to avoid years like 2024
+                nums = re.findall(r'\(?(\d{1,3}(?:,\d{3})+)\)?', snippet)
+                
+                for n in nums:
+                    val_str = n.replace(',', '')
+                    try:
+                        val = float(val_str)
+                        # Filter out Years and Page Numbers
+                        if 1900 < val < 2100: continue 
+                        
+                        # Check for parens indicating negative
+                        if f"({n})" in snippet: val = -val
+                        
+                        return val / 1000 # Assume Millions -> Billions
+                    except: continue
         return 0.0
 
-    return {
-        'Revenue': find(r'Net\s+Sales|Net\s+Revenues?|Total\s+Revenues?'),
-        'EBIT': find(r'Operating\s+Income|Operating\s+Profit'),
-        'Depreciation': find(r'Depreciation'),
-        'Capex': abs(find(r'Capital\s+expenditures')),
-        'Debt': find(r'Total\s+Debt|Long-term\s+debt'),
-        'Cash': find(r'Cash\s+and\s+cash')
-    }
-
-def get_financials_hybrid(html_text):
-    # 1. Try Tables
-    d = parse_tables(html_text)
+    # Define synonyms (Expanded for AMD/Tech filings)
+    data['Revenue'] = find_near(['Total net revenue', 'Net revenue', 'Net sales', 'Total revenue'])
+    data['EBIT']    = find_near(['Operating income', 'Operating loss', 'Income from operations'])
+    data['Depreciation'] = find_near(['Depreciation and amortization', 'Depreciation expense'])
+    data['Capex']   = abs(find_near(['Purchases of property', 'Capital expenditures', 'Additions to property']))
+    data['Debt']    = find_near(['Total debt', 'Long-term debt', 'Notes payable'])
+    data['Cash']    = find_near(['Cash and cash equivalents', 'Total cash'])
     
-    # 2. If Revenue is missing, try Text Fallback
-    if d['Revenue'] == 0.0:
-        d_text = parse_text_fallback(html_text)
-        # Merge: prefer text fallback if table missed it
-        for k, v in d_text.items():
-            if d[k] == 0.0: d[k] = v
-            
-    return d
+    return data, blob[:1000] # Return data + debug snippet
 
 # --------------------------------------------------
 #  UI: INPUTS
 # --------------------------------------------------
 c_tick, c_url = st.columns([1, 4])
-ticker = c_tick.text_input("Ticker", "").upper()
-raw_url = c_url.text_input("SEC 10-K URL", placeholder="Paste SEC link to auto-fill Year 0")
+ticker = c_tick.text_input("Ticker", "AMD").upper()
+raw_url = c_url.text_input("SEC 10-K URL", placeholder="Paste SEC link (iXBRL or HTML supported)")
 
 if 'y0' not in st.session_state:
     st.session_state.y0 = {k:0.0 for k in ['Revenue','EBIT','Depreciation','Capex','Debt','Cash']}
 
 if raw_url:
-    final_url = fix_ixbrl_url(raw_url)
-    with st.spinner("Analyzing Financials (Hybrid Engine)..."):
-        txt = fetch_text(final_url)
-        if txt:
-            d = get_financials_hybrid(txt)
+    with st.spinner("Scraping (Nuclear Mode)..."):
+        blob_text = fetch_text_blob(raw_url)
+        if blob_text:
+            d, debug_txt = extract_from_blob(blob_text)
+            
             if d['Revenue'] != 0: 
                 st.session_state.y0 = d
-                st.toast("✅ Data Extracted!", icon="💰")
+                st.toast("✅ Data Found!", icon="🔥")
             else:
-                st.error("Scraper failed. Please enter Year 0 manually.")
-                with st.expander("Debug: Show Scraped Tables"):
-                    try:
-                        dfs = pd.read_html(StringIO(txt))
-                        for i, df in enumerate(dfs):
-                            st.write(f"Table {i}")
-                            st.dataframe(df.head(3))
-                    except: st.write("No tables found.")
+                st.error("Scraper scanned text but didn't find 'Net Revenue' followed by a valid number.")
+                with st.expander("Debug: Scraper Text View"):
+                    st.write(blob_text[:2000]) # Show first 2000 chars
 
 # Live Price
 cur_price, shares_def = 0.0, 1.0
@@ -245,14 +200,12 @@ if r_in > 0:
     fcf5 = df.loc[5,'FCFF']
     ebitda5 = df.loc[5,'EBIT'] + df.loc[5,'D&A']
     
-    # Gordon
     tv_g = fcf5 * (1+ltg)/(wacc-ltg)
     pv_tv_g = tv_g * ((1+wacc)**-5)
     ev_g = sum_pv + pv_tv_g
     eq_g = ev_g - (debt_in - cash_in)
     p_g = eq_g / shares_in
     
-    # Exit
     tv_e = ebitda5 * exit_mult
     pv_tv_e = tv_e * ((1+wacc)**-5)
     ev_e = sum_pv + pv_tv_e
@@ -265,11 +218,16 @@ else:
 #  VISUALIZATION
 # --------------------------------------------------
 st.divider()
+
+# TABLE
 st.subheader("Projected Free Cash Flow (Billions)")
 st.dataframe(df.T.style.format("{:,.2f}"), use_container_width=True)
+
 st.markdown("<br>", unsafe_allow_html=True)
 
+# CARDS
 col_g, col_e = st.columns(2)
+
 with col_g:
     st.markdown(f"""<div class="val-card border-purple"><div class="val-title">Perpetuity Growth 🌊</div><div class="val-sub">Valuation based on long-term growth (g)</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-purple">${p_g:.2f}</div><div class="val-ev"><span>Enterprise Value</span><strong>${ev_g:.2f}B</strong></div></div>""", unsafe_allow_html=True)
     bridge_g = pd.DataFrame({"Component": ["PV of 5y Cash Flows", "PV of Terminal Value", "Enterprise Value", "Less: Net Debt", "Equity Value"], "Value": [sum_pv, pv_tv_g, ev_g, debt_in-cash_in, ev_g-(debt_in-cash_in)]}).set_index("Component")
