@@ -31,7 +31,7 @@ div[data-testid="stExpander"] { background-color: rgba(255,255,255,0.02); border
 st.markdown('<h1 style="text-align:center; margin-bottom: 30px;">SEC 10-K ➜ DCF Model</h1>', unsafe_allow_html=True)
 
 # --------------------------------------------------
-#  LOGIC: PANDAS TABLE PARSER (ROBUST)
+#  LOGIC: ROBUST PARSER + URL FIXER
 # --------------------------------------------------
 @st.cache_data(show_spinner=False)
 def fetch_text(url):
@@ -41,54 +41,46 @@ def fetch_text(url):
     except:
         return ""
 
+def fix_ixbrl_url(url):
+    """
+    Converts 'https://www.sec.gov/ix?doc=/Archives/...' 
+    to 'https://www.sec.gov/Archives/...'
+    """
+    if "ix?doc=" in url:
+        # Split by 'doc=' and take the second part
+        # usually /Archives/edgar/data/...
+        clean_path = url.split("doc=")[-1]
+        # Ensure it starts with the domain
+        if clean_path.startswith("/"):
+            return "https://www.sec.gov" + clean_path
+        return clean_path
+    return url
+
 def clean_value(val):
-    """
-    Cleans a table cell value to a float.
-    Handles: (123), 123,456, $123
-    Returns None if it's a Year (2022-2025) or not a number.
-    """
     if isinstance(val, (int, float)):
-        # If it's a year-like integer, ignore it
         if 1990 < val < 2030: return None
         return float(val)
-    
     val = str(val).strip()
-    
-    # Handle parentheses for negatives
-    is_neg = False
-    if '(' in val and ')' in val:
-        is_neg = True
-        
-    # Remove junk characters
+    is_neg = '(' in val and ')' in val
     clean = re.sub(r'[^\d\.]', '', val)
-    
     if not clean: return None
-    
     try:
         num = float(clean)
-        # Filter out Years (e.g. 2023 appearing in header)
-        if 1990 < num < 2030 and num.is_integer():
-            return None
+        if 1990 < num < 2030 and num.is_integer(): return None
         return -num if is_neg else num
-    except:
-        return None
+    except: return None
 
 def extract_year_0(html_text):
-    """
-    Parses ALL tables in the HTML.
-    Looks for row labels matching keywords.
-    Grabs the first valid number in that row.
-    """
-    try:
-        # Read all tables from HTML
-        dfs = pd.read_html(StringIO(html_text), flavor='lxml')
-    except Exception as e:
-        st.error(f"Could not parse HTML tables: {e}")
-        return {}
-
+    # Initialize defaults so we NEVER return an empty dict (Prevents KeyError)
     data = {k: 0.0 for k in ['Revenue', 'EBIT', 'Depreciation', 'Capex', 'Debt', 'Cash']}
     
-    # regex patterns for row labels
+    try:
+        # REMOVED flavor='lxml' to fix missing dependency error
+        dfs = pd.read_html(StringIO(html_text))
+    except Exception as e:
+        # Fail silently but return the empty data structure
+        return data
+
     patterns = {
         'Revenue': r'Total\s+Net\s+Sales|Net\s+Sales|Total\s+Revenues|Revenue',
         'EBIT': r'Operating\s+Income|Operating\s+Profit|Loss\s+from\s+operations|Income\s+from\s+operations',
@@ -98,28 +90,17 @@ def extract_year_0(html_text):
         'Cash': r'Cash\s+and\s+cash\s+equivalents|Total\s+cash'
     }
     
-    # Iterate through every table found in the 10-K
     for df in dfs:
-        # Convert entire dataframe to string to search
-        # If the table is tiny or empty, skip
         if df.shape[1] < 2: continue
-        
-        # Iterate over rows
         for idx, row in df.iterrows():
-            row_label = str(row[0]) # First column is usually the label
-            
+            row_label = str(row[0])
             for key, pattern in patterns.items():
-                # If we haven't found this value yet OR we found a 0 and want to try again
                 if data[key] == 0.0:
                     if re.search(pattern, row_label, re.IGNORECASE):
-                        # Found a row label! Now look for the number in subsequent columns.
                         for col_val in row[1:]:
                             val = clean_value(col_val)
                             if val is not None:
-                                # We found a valid number.
-                                # Assume Millions -> Billions
                                 data[key] = val / 1000
-                                # Force Capex to be positive for the model logic (subtracted later)
                                 if key == 'Capex': data[key] = abs(data[key])
                                 break 
     return data
@@ -129,22 +110,30 @@ def extract_year_0(html_text):
 # --------------------------------------------------
 c_tick, c_url = st.columns([1, 4])
 ticker = c_tick.text_input("Ticker", "").upper()
-url = c_url.text_input("SEC 10-K URL", placeholder="Paste SEC link to auto-fill Year 0")
+raw_url = c_url.text_input("SEC 10-K URL", placeholder="Paste SEC link to auto-fill Year 0")
 
-# Session State Init
 if 'y0' not in st.session_state:
     st.session_state.y0 = {k:0.0 for k in ['Revenue','EBIT','Depreciation','Capex','Debt','Cash']}
 
-if url:
-    with st.spinner("Parsing Tables (Pandas Mode)..."):
-        txt = fetch_text(url)
+if raw_url:
+    # AUTO-FIX URL before fetching
+    final_url = fix_ixbrl_url(raw_url)
+    
+    if final_url != raw_url:
+        st.caption(f"ℹ️ Converted iXBRL Viewer link to raw HTML: {final_url}")
+
+    with st.spinner("Parsing Tables..."):
+        txt = fetch_text(final_url)
         if txt:
             d = extract_year_0(txt)
+            # Safe check: only update if we actually found something
             if d['Revenue'] != 0: 
                 st.session_state.y0 = d
                 st.toast("✅ Data Extracted from Tables!", icon="📊")
             else:
-                st.error("Could not find Revenue in any table. Try entering manually.")
+                st.warning("Tables parsed, but no matching Revenue row found. Try entering manually.")
+        else:
+            st.error("Could not fetch URL. Ensure it is a public SEC link.")
 
 # Live Price
 cur_price, shares_def = 0.0, 1.0
