@@ -16,7 +16,9 @@ if url:
     ebitda= line(r'EBITDA|OperatingIncomeLoss', txt)
     capex = line(r'CapitalExpenditures', txt)
     fcf   = ebitda - 0.21*ebitda - capex
-    ticker= re.search(r'entityName[^<]+<[^>]+>([^<]+)', txt).group(1)[:4].upper()
+    # SAFE ticker extract
+    ticker_match = re.search(r'entityName[^<]+<[^>]+>([^<]+)', txt)
+    ticker = ticker_match.group(1)[:4].upper() if ticker_match else "STCK"
     st.success(f"Loaded {ticker}: Rev ${rev:,.0f}M, EBITDA ${ebitda:,.0f}M")
     g = st.slider("Growth %", 0, 15, 5)/100
     m = st.slider("Terminal EBITDA multiple", 6, 18, 10)
