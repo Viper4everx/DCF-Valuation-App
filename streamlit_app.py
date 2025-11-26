@@ -31,7 +31,7 @@ div[data-testid="stExpander"] { background-color: rgba(255,255,255,0.02); border
 st.markdown('<h1 style="text-align:center; margin-bottom: 30px;">SEC 10-K ➜ DCF Model</h1>', unsafe_allow_html=True)
 
 # --------------------------------------------------
-#  LOGIC: ROBUST PARSER + URL FIXER
+#  LOGIC: HYBRID SCRAPER (Tables + Text Fallback)
 # --------------------------------------------------
 @st.cache_data(show_spinner=False)
 def fetch_text(url):
@@ -42,21 +42,13 @@ def fetch_text(url):
         return ""
 
 def fix_ixbrl_url(url):
-    """
-    Converts 'https://www.sec.gov/ix?doc=/Archives/...' 
-    to 'https://www.sec.gov/Archives/...'
-    """
     if "ix?doc=" in url:
-        # Split by 'doc=' and take the second part
-        # usually /Archives/edgar/data/...
-        clean_path = url.split("doc=")[-1]
-        # Ensure it starts with the domain
-        if clean_path.startswith("/"):
-            return "https://www.sec.gov" + clean_path
-        return clean_path
+        clean = url.split("doc=")[-1]
+        return "https://www.sec.gov" + clean if clean.startswith("/") else clean
     return url
 
 def clean_value(val):
+    """Parses numeric string to float. Returns None if invalid or a year."""
     if isinstance(val, (int, float)):
         if 1990 < val < 2030: return None
         return float(val)
@@ -66,37 +58,42 @@ def clean_value(val):
     if not clean: return None
     try:
         num = float(clean)
+        # Avoid capturing years like 2023, 2024 as values
         if 1990 < num < 2030 and num.is_integer(): return None
         return -num if is_neg else num
     except: return None
 
-def extract_year_0(html_text):
-    # Initialize defaults so we NEVER return an empty dict (Prevents KeyError)
+# --- STRATEGY A: TABLE PARSING ---
+def parse_tables(html_text):
     data = {k: 0.0 for k in ['Revenue', 'EBIT', 'Depreciation', 'Capex', 'Debt', 'Cash']}
-    
     try:
-        # REMOVED flavor='lxml' to fix missing dependency error
         dfs = pd.read_html(StringIO(html_text))
-    except Exception as e:
-        # Fail silently but return the empty data structure
+    except:
         return data
 
     patterns = {
-        'Revenue': r'Total\s+Net\s+Sales|Net\s+Sales|Total\s+Revenues|Revenue',
-        'EBIT': r'Operating\s+Income|Operating\s+Profit|Loss\s+from\s+operations|Income\s+from\s+operations',
-        'Depreciation': r'Depreciation\s+and\s+amortization|Depreciation\s+expense',
-        'Capex': r'Capital\s+expenditures|Additions\s+to\s+property|Purchase\s+of\s+property',
+        'Revenue': r'Net\s+Sales|Net\s+Revenue|Total\s+Revenues?|Revenue',
+        'EBIT': r'Operating\s+Income|Operating\s+Profit|Income\s+from\s+operations',
+        'Depreciation': r'Depreciation',
+        'Capex': r'Capital\s+expenditures|Additions\s+to\s+property',
         'Debt': r'Total\s+Debt|Long-term\s+debt|Notes\s+payable',
-        'Cash': r'Cash\s+and\s+cash\s+equivalents|Total\s+cash'
+        'Cash': r'Cash\s+and\s+cash\s+equivalents'
     }
     
     for df in dfs:
         if df.shape[1] < 2: continue
+        # Convert first 3 columns to string to check for labels (handles indentation)
+        # We fill NaNs so regex doesn't crash
+        df_str = df.astype(str).fillna("")
+        
         for idx, row in df.iterrows():
-            row_label = str(row[0])
+            # Check first 3 columns for the label
+            row_label = " ".join([str(row[i]) for i in range(min(3, len(row)))])
+            
             for key, pattern in patterns.items():
                 if data[key] == 0.0:
                     if re.search(pattern, row_label, re.IGNORECASE):
+                        # Label found! Look for first valid number in remaining columns
                         for col_val in row[1:]:
                             val = clean_value(col_val)
                             if val is not None:
@@ -104,6 +101,43 @@ def extract_year_0(html_text):
                                 if key == 'Capex': data[key] = abs(data[key])
                                 break 
     return data
+
+# --- STRATEGY B: RAW TEXT FALLBACK ---
+def parse_text_fallback(txt):
+    def find(pattern):
+        # Look for pattern followed by a number with commas
+        # Allows for messy HTML tags in between
+        regex = pattern + r'.{0,300}?>\s*\(?(\d{1,3}(?:,\d{3})+)\)?'
+        m = re.search(regex, txt, re.IGNORECASE | re.DOTALL)
+        if m:
+            try:
+                val = float(m.group(1).replace(',', ''))
+                if '(' in m.group(0) and ')' in m.group(0): val = -val
+                return val / 1000
+            except: pass
+        return 0.0
+
+    return {
+        'Revenue': find(r'Net\s+Sales|Net\s+Revenues?|Total\s+Revenues?'),
+        'EBIT': find(r'Operating\s+Income|Operating\s+Profit'),
+        'Depreciation': find(r'Depreciation'),
+        'Capex': abs(find(r'Capital\s+expenditures')),
+        'Debt': find(r'Total\s+Debt|Long-term\s+debt'),
+        'Cash': find(r'Cash\s+and\s+cash')
+    }
+
+def get_financials_hybrid(html_text):
+    # 1. Try Tables
+    d = parse_tables(html_text)
+    
+    # 2. If Revenue is missing, try Text Fallback
+    if d['Revenue'] == 0.0:
+        d_text = parse_text_fallback(html_text)
+        # Merge: prefer text fallback if table missed it
+        for k, v in d_text.items():
+            if d[k] == 0.0: d[k] = v
+            
+    return d
 
 # --------------------------------------------------
 #  UI: INPUTS
@@ -116,24 +150,23 @@ if 'y0' not in st.session_state:
     st.session_state.y0 = {k:0.0 for k in ['Revenue','EBIT','Depreciation','Capex','Debt','Cash']}
 
 if raw_url:
-    # AUTO-FIX URL before fetching
     final_url = fix_ixbrl_url(raw_url)
-    
-    if final_url != raw_url:
-        st.caption(f"ℹ️ Converted iXBRL Viewer link to raw HTML: {final_url}")
-
-    with st.spinner("Parsing Tables..."):
+    with st.spinner("Analyzing Financials (Hybrid Engine)..."):
         txt = fetch_text(final_url)
         if txt:
-            d = extract_year_0(txt)
-            # Safe check: only update if we actually found something
+            d = get_financials_hybrid(txt)
             if d['Revenue'] != 0: 
                 st.session_state.y0 = d
-                st.toast("✅ Data Extracted from Tables!", icon="📊")
+                st.toast("✅ Data Extracted!", icon="💰")
             else:
-                st.warning("Tables parsed, but no matching Revenue row found. Try entering manually.")
-        else:
-            st.error("Could not fetch URL. Ensure it is a public SEC link.")
+                st.error("Scraper failed. Please enter Year 0 manually.")
+                with st.expander("Debug: Show Scraped Tables"):
+                    try:
+                        dfs = pd.read_html(StringIO(txt))
+                        for i, df in enumerate(dfs):
+                            st.write(f"Table {i}")
+                            st.dataframe(df.head(3))
+                    except: st.write("No tables found.")
 
 # Live Price
 cur_price, shares_def = 0.0, 1.0
@@ -159,7 +192,7 @@ with st.expander("Expand to edit Year 0 Data", expanded=True):
         submitted = st.form_submit_button("Update Model")
 
 # --------------------------------------------------
-#  UI: SIDEBAR ASSUMPTIONS
+#  UI: SIDEBAR
 # --------------------------------------------------
 with st.sidebar:
     st.header("Assumptions")
@@ -179,16 +212,13 @@ years = range(1, 6)
 data = []
 
 if r_in > 0:
-    # 1. ADD YEAR 0
+    # Year 0
     tax_r = 0.21
     nopat0 = e_in * (1 - tax_r)
     fcff0 = nopat0 + d_in - c_in
-    data.append({
-        'Year': 0, 'Revenue': r_in, 'EBIT': e_in, 'NOPAT': nopat0, 
-        'D&A': d_in, 'Capex': c_in, 'FCFF': fcff0, 'PV': 0.0 
-    })
+    data.append({'Year': 0, 'Revenue': r_in, 'EBIT': e_in, 'NOPAT': nopat0, 'D&A': d_in, 'Capex': c_in, 'FCFF': fcff0, 'PV': 0.0})
 
-    # 2. CALCULATE YEARS 1-5
+    # Years 1-5
     cap_r = c_in/r_in
     dep_r = d_in/r_in
     nwc_r = 0.02
@@ -206,14 +236,11 @@ if r_in > 0:
         data.append({'Year':y,'Revenue':rev,'EBIT':ebit,'NOPAT':nopat,'D&A':da,'Capex':capex,'FCFF':fcff,'PV':pv})
         prev_rev = rev
 else:
-    # Empty State (0-5)
-    for y in range(0, 6):
-        data.append({'Year':y,'Revenue':0.0,'EBIT':0.0,'NOPAT':0.0,'D&A':0.0,'Capex':0.0,'FCFF':0.0,'PV':0.0})
+    for y in range(0, 6): data.append({'Year':y,'Revenue':0.0,'EBIT':0.0,'NOPAT':0.0,'D&A':0.0,'Capex':0.0,'FCFF':0.0,'PV':0.0})
 
 df = pd.DataFrame(data).set_index('Year')
-sum_pv = df.loc[1:5, 'PV'].sum() # Sum future years only
+sum_pv = df.loc[1:5, 'PV'].sum()
 
-# Valuation Logic
 if r_in > 0:
     fcf5 = df.loc[5,'FCFF']
     ebitda5 = df.loc[5,'EBIT'] + df.loc[5,'D&A']
@@ -238,16 +265,11 @@ else:
 #  VISUALIZATION
 # --------------------------------------------------
 st.divider()
-
-# TABLE
 st.subheader("Projected Free Cash Flow (Billions)")
 st.dataframe(df.T.style.format("{:,.2f}"), use_container_width=True)
-
 st.markdown("<br>", unsafe_allow_html=True)
 
-# CARDS
 col_g, col_e = st.columns(2)
-
 with col_g:
     st.markdown(f"""<div class="val-card border-purple"><div class="val-title">Perpetuity Growth 🌊</div><div class="val-sub">Valuation based on long-term growth (g)</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-purple">${p_g:.2f}</div><div class="val-ev"><span>Enterprise Value</span><strong>${ev_g:.2f}B</strong></div></div>""", unsafe_allow_html=True)
     bridge_g = pd.DataFrame({"Component": ["PV of 5y Cash Flows", "PV of Terminal Value", "Enterprise Value", "Less: Net Debt", "Equity Value"], "Value": [sum_pv, pv_tv_g, ev_g, debt_in-cash_in, ev_g-(debt_in-cash_in)]}).set_index("Component")
