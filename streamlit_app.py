@@ -13,17 +13,33 @@ st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
 body{font-family:'Inter',sans-serif;background:linear-gradient(135deg,#1e1e2f 0%,#2a2a3e 100%);color:#f0f2f6;}
+
+/* Glassmorphic Cards */
 .glass-card { background: rgba(255,255,255,0.05); border-radius: 12px; padding: 20px; border: 1px solid rgba(255,255,255,0.1); margin-bottom: 20px; }
 .val-card { background: rgba(255,255,255,0.03); border-radius: 12px; padding: 24px; border: 1px solid rgba(255,255,255,0.08); height: 100%; transition: transform 0.2s; }
 .val-card:hover { transform: translateY(-3px); }
+
+/* Accents */
 .border-purple { border-left: 5px solid #8b5cf6; } .text-purple { color: #a78bfa; }
 .border-green { border-left: 5px solid #10b981; } .text-green { color: #34d399; }
+.border-blue { border-left: 5px solid #3b82f6; } .text-blue { color: #60a5fa; }
+
+/* Status Colors for MoS */
+.status-under { color: #4ade80; font-weight: 700; } /* Green */
+.status-over { color: #f87171; font-weight: 700; }  /* Red */
+
+/* Typography */
 .val-title { font-size: 18px; font-weight: 600; margin-bottom: 4px; color: #fff; }
 .val-sub { font-size: 12px; opacity: 0.6; margin-bottom: 20px; }
 .val-label { font-size: 11px; font-weight: 700; opacity: 0.5; letter-spacing: 1px; text-transform: uppercase; }
 .val-price { font-size: 42px; font-weight: 700; margin: 4px 0 16px 0; color: #fff; }
 .val-ev { font-size: 14px; opacity: 0.8; display: flex; justify-content: space-between; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 12px; }
+
+/* Streamlit Overrides */
 div[data-testid="stExpander"] { background-color: rgba(255,255,255,0.02); border-radius: 12px; }
+
+/* CENTER TABLE HEADERS */
+th { text-align: center !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -35,18 +51,13 @@ st.markdown('<h1 style="text-align:center; margin-bottom: 30px;">SEC 10-K ➜ DC
 @st.cache_data(show_spinner=False)
 def fetch_text_blob(url):
     try:
-        # 1. FIX THE URL (Handle iXBRL viewer)
         if "ix?doc=" in url:
             clean_path = url.split("doc=")[-1]
-            if clean_path.startswith("/"):
-                url = "https://www.sec.gov" + clean_path
-            else:
-                url = clean_path
+            url = "https://www.sec.gov" + clean_path if clean_path.startswith("/") else clean_path
             
         headers = {'User-Agent': 'AnalystTool contact@admin.com'} 
         html = requests.get(url, headers=headers).text
         
-        # 2. NUCLEAR CLEANING
         text = html.replace('&nbsp;', ' ').replace('&#160;', ' ')
         text = re.sub(r'<(script|style)[^>]*>.*?</\1>', ' ', text, flags=re.DOTALL) 
         text = re.sub(r'<[^>]+>', '   ', text) 
@@ -63,14 +74,13 @@ def extract_from_blob(blob):
             matches = [m.start() for m in re.finditer(re.escape(kw), blob, re.IGNORECASE)]
             for pos in matches:
                 snippet = blob[pos:pos+500]
-                # Find numbers like 123,456 or (123,456)
                 nums = re.findall(r'\(?(\d{1,3}(?:,\d{3})+)\)?', snippet)
                 for n in nums:
                     val_str = n.replace(',', '')
                     try:
                         val = float(val_str)
-                        if 1900 < val < 2100: continue # Skip years
-                        if f"({n})" in snippet: val = -val # Handle negatives
+                        if 1900 < val < 2100: continue
+                        if f"({n})" in snippet: val = -val
                         return val / 1000 # Millions -> Billions
                     except: continue
         return 0.0
@@ -82,7 +92,7 @@ def extract_from_blob(blob):
     data['Debt']    = find_near(['Total debt', 'Long-term debt', 'Notes payable'])
     data['Cash']    = find_near(['Cash and cash equivalents', 'Total cash'])
     
-    return data, blob[:1000]
+    return data
 
 # --------------------------------------------------
 #  UI: INPUTS
@@ -98,14 +108,16 @@ if raw_url:
     with st.spinner("Scraping (Nuclear Mode)..."):
         blob_text = fetch_text_blob(raw_url)
         if blob_text:
-            d, debug_txt = extract_from_blob(blob_text)
+            d = extract_from_blob(blob_text)
             if d['Revenue'] != 0: 
                 st.session_state.y0 = d
                 st.toast("✅ Data Found!", icon="🔥")
             else:
                 st.error("Scraper scanned text but didn't find 'Net Revenue' followed by a valid number.")
 
-# Live Price
+# --------------------------------------------------
+#  LOGIC: LIVE PRICE FETCH
+# --------------------------------------------------
 cur_price, shares_def = 0.0, 1.0
 if ticker:
     try:
@@ -178,44 +190,75 @@ else:
 df = pd.DataFrame(data).set_index('Year')
 sum_pv = df.loc[1:5, 'PV'].sum()
 
+# Valuation
 if r_in > 0:
     fcf5 = df.loc[5,'FCFF']
     ebitda5 = df.loc[5,'EBIT'] + df.loc[5,'D&A']
     
+    # Gordon
     tv_g = fcf5 * (1+ltg)/(wacc-ltg)
     pv_tv_g = tv_g * ((1+wacc)**-5)
     ev_g = sum_pv + pv_tv_g
     eq_g = ev_g - (debt_in - cash_in)
     p_g = eq_g / shares_in
     
+    # Exit
     tv_e = ebitda5 * exit_mult
     pv_tv_e = tv_e * ((1+wacc)**-5)
     ev_e = sum_pv + pv_tv_e
     eq_e = ev_e - (debt_in - cash_in)
     p_e = eq_e / shares_in
+    
+    # --- NEW: MARGIN OF SAFETY LOGIC ---
+    avg_intrinsic = (p_g + p_e) / 2
+    if cur_price > 0:
+        mos_pct = (avg_intrinsic - cur_price) / cur_price
+    else:
+        mos_pct = 0.0
 else:
-    p_g = p_e = ev_g = ev_e = pv_tv_g = pv_tv_e = 0.0
+    p_g = p_e = ev_g = ev_e = pv_tv_g = pv_tv_e = avg_intrinsic = mos_pct = 0.0
 
 # --------------------------------------------------
-#  VISUALIZATION (FORMATTING UPDATE)
+#  VISUALIZATION
 # --------------------------------------------------
 st.divider()
 
-# TABLE: Scale to Millions and Rename Columns
+# --- VERDICT / MARGIN OF SAFETY SUMMARY ---
+if cur_price > 0 and r_in > 0:
+    if mos_pct >= 0:
+        status_color = "status-under"
+        status_text = "UNDERVALUED"
+    else:
+        status_color = "status-over"
+        status_text = "OVERVALUED"
+        
+    st.markdown(f"""
+    <div class="glass-card" style="display:flex; justify-content: space-around; align-items: center;">
+        <div style="text-align:center;">
+            <div class="val-label">CURRENT PRICE</div>
+            <div class="val-price">${cur_price:.2f}</div>
+        </div>
+        <div style="text-align:center;">
+            <div class="val-label">AVG INTRINSIC VALUE</div>
+            <div class="val-price text-blue">${avg_intrinsic:.2f}</div>
+        </div>
+        <div style="text-align:center;">
+            <div class="val-label">UPSIDE / DOWNSIDE</div>
+            <div class="val-price {status_color}">{mos_pct:+.1%}</div>
+            <div class="{status_color}" style="letter-spacing:2px;">{status_text}</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+# --- TABLE ---
 st.subheader("Projected Free Cash Flow (Millions USD)")
-
-# 1. Create a display version (Multiply by 1000 to convert Billions to Millions)
-df_display = df * 1000
-
-# 2. Rename Index (which becomes columns after Transpose)
-df_display.index = [f"Year {y}" for y in df_display.index]
-
-# 3. Display with NO decimals (commas only)
-st.dataframe(df_display.T.style.format("{:,.0f}"), use_container_width=True)
+df_display = df * 1000 # Billions -> Millions
+df_display.index = [f"Year {y}" for y in df_display.index] # Center aligned via CSS
+st.dataframe(df_display.T.style.format("{:,.2f}"), use_container_width=True)
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-# CARDS
+# --- CARDS ---
 col_g, col_e = st.columns(2)
 
 with col_g:
