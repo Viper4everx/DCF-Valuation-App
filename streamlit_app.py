@@ -36,7 +36,6 @@ st.markdown('<h1 style="text-align:center; margin-bottom: 30px;">SEC 10-K ➜ DC
 def fetch_text_blob(url):
     try:
         # 1. FIX THE URL (Handle iXBRL viewer)
-        # Converts /ix?doc=/Archives/... to https://www.sec.gov/Archives/...
         if "ix?doc=" in url:
             clean_path = url.split("doc=")[-1]
             if clean_path.startswith("/"):
@@ -47,13 +46,11 @@ def fetch_text_blob(url):
         headers = {'User-Agent': 'AnalystTool contact@admin.com'} 
         html = requests.get(url, headers=headers).text
         
-        # 2. NUCLEAR CLEANING (Destroy all HTML tags)
-        # We want a single stream of text to find "Revenue" then the next number.
+        # 2. NUCLEAR CLEANING
         text = html.replace('&nbsp;', ' ').replace('&#160;', ' ')
-        text = re.sub(r'<(script|style)[^>]*>.*?</\1>', ' ', text, flags=re.DOTALL) # Remove JS/CSS
-        text = re.sub(r'<[^>]+>', '   ', text) # Remove HTML tags
-        text = re.sub(r'\s+', ' ', text) # Collapse multiple spaces
-        
+        text = re.sub(r'<(script|style)[^>]*>.*?</\1>', ' ', text, flags=re.DOTALL) 
+        text = re.sub(r'<[^>]+>', '   ', text) 
+        text = re.sub(r'\s+', ' ', text) 
         return text
     except:
         return ""
@@ -62,34 +59,22 @@ def extract_from_blob(blob):
     data = {k: 0.0 for k in ['Revenue', 'EBIT', 'Depreciation', 'Capex', 'Debt', 'Cash']}
     
     def find_near(keywords):
-        # Scan the text for the keywords
         for kw in keywords:
-            # Find all start indices of the keyword
             matches = [m.start() for m in re.finditer(re.escape(kw), blob, re.IGNORECASE)]
-            
             for pos in matches:
-                # Grab the chunk of text immediately following the keyword
                 snippet = blob[pos:pos+500]
-                
-                # Regex to find numbers: 123,456 or (123,456)
-                # Requires a comma to avoid years like 2024
+                # Find numbers like 123,456 or (123,456)
                 nums = re.findall(r'\(?(\d{1,3}(?:,\d{3})+)\)?', snippet)
-                
                 for n in nums:
                     val_str = n.replace(',', '')
                     try:
                         val = float(val_str)
-                        # Filter out Years and Page Numbers
-                        if 1900 < val < 2100: continue 
-                        
-                        # Check for parens indicating negative
-                        if f"({n})" in snippet: val = -val
-                        
-                        return val / 1000 # Assume Millions -> Billions
+                        if 1900 < val < 2100: continue # Skip years
+                        if f"({n})" in snippet: val = -val # Handle negatives
+                        return val / 1000 # Millions -> Billions
                     except: continue
         return 0.0
 
-    # Define synonyms (Expanded for AMD/Tech filings)
     data['Revenue'] = find_near(['Total net revenue', 'Net revenue', 'Net sales', 'Total revenue'])
     data['EBIT']    = find_near(['Operating income', 'Operating loss', 'Income from operations'])
     data['Depreciation'] = find_near(['Depreciation and amortization', 'Depreciation expense'])
@@ -97,7 +82,7 @@ def extract_from_blob(blob):
     data['Debt']    = find_near(['Total debt', 'Long-term debt', 'Notes payable'])
     data['Cash']    = find_near(['Cash and cash equivalents', 'Total cash'])
     
-    return data, blob[:1000] # Return data + debug snippet
+    return data, blob[:1000]
 
 # --------------------------------------------------
 #  UI: INPUTS
@@ -114,14 +99,11 @@ if raw_url:
         blob_text = fetch_text_blob(raw_url)
         if blob_text:
             d, debug_txt = extract_from_blob(blob_text)
-            
             if d['Revenue'] != 0: 
                 st.session_state.y0 = d
                 st.toast("✅ Data Found!", icon="🔥")
             else:
                 st.error("Scraper scanned text but didn't find 'Net Revenue' followed by a valid number.")
-                with st.expander("Debug: Scraper Text View"):
-                    st.write(blob_text[:2000]) # Show first 2000 chars
 
 # Live Price
 cur_price, shares_def = 0.0, 1.0
@@ -215,13 +197,21 @@ else:
     p_g = p_e = ev_g = ev_e = pv_tv_g = pv_tv_e = 0.0
 
 # --------------------------------------------------
-#  VISUALIZATION
+#  VISUALIZATION (FORMATTING UPDATE)
 # --------------------------------------------------
 st.divider()
 
-# TABLE
-st.subheader("Projected Free Cash Flow (Billions)")
-st.dataframe(df.T.style.format("{:,.2f}"), use_container_width=True)
+# TABLE: Scale to Millions and Rename Columns
+st.subheader("Projected Free Cash Flow (Millions USD)")
+
+# 1. Create a display version (Multiply by 1000 to convert Billions to Millions)
+df_display = df * 1000
+
+# 2. Rename Index (which becomes columns after Transpose)
+df_display.index = [f"Year {y}" for y in df_display.index]
+
+# 3. Display with NO decimals (commas only)
+st.dataframe(df_display.T.style.format("{:,.0f}"), use_container_width=True)
 
 st.markdown("<br>", unsafe_allow_html=True)
 
