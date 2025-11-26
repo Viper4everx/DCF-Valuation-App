@@ -2,21 +2,57 @@ import streamlit as st, pandas as pd, yfinance as yf, requests, re, math
 st.set_page_config(page_title="DCF Model", layout="wide")
 st.title("SEC 10-K ➜ Full DCF Output")
 
-# ---------- helpers ----------
+# --------------------------------------------------
+#  NEW ROBUST HELPER (tries 3 patterns, builds if missing, falls back to Yahoo)
+# --------------------------------------------------
 def get_txt(url):
     return requests.get(url, headers={'User-Agent':'Mozilla'}).text
 
-def line(tag, txt):
-    m = re.search(rf'{tag}[^>]*>\s*([-\d,]+)', txt)
-    return int(m.group(1).replace(',',''))/1e6 if m else 0.0
+def grab(phrase, txt, default=0.0):
+    """pull first number after phrase; robust to tag variations"""
+    m = re.search(rf'{phrase}[^>]*>\s*([-\d,]+)', txt, re.I)
+    return int(m.group(1).replace(',',''))/1e6 if m else default
 
 @st.cache_data
-def pull_financials(url):
+def pull_financials(url, ticker):
     txt = get_txt(url)
-    rev   = line(r'Revenues?', txt)
-    ebit  = line(r'OperatingIncomeLoss|EBIT', txt)
-    dep   = line(r'Depreciation|DepreciationDepletionAndAmortization', txt)
-    capex = line(r'CapitalExpenditures', txt)
+
+    # 1. Revenue (multiple fallback tags)
+    rev = grab(r'Revenues?|NetSales|NetRevenues?|TotalRevenues?', txt)
+
+    # 2. Operating Income (EBIT)
+    ebit = grab(r'OperatingIncomeLoss|OperatingIncome|EBIT', txt)
+
+    # 3. Depreciation & Amortisation
+    dep = grab(r'DepreciationDepletionAndAmortization|Depreciation|Amortization', txt)
+
+    # 4. Capex
+    capex = grab(r'CapitalExpenditures|PaymentsToAcquirePropertyPlantAndEquipment', txt)
+
+    # 5. If **any** core number still zero, **build** from lower-level tags
+    if rev == 0 or ebit == 0:
+        # Revenue = Net-Sales (another common tag)
+        rev = grab(r'us-gaap:NetSales|us-gaap:Revenues|us-gaap:SalesRevenueNet|SalesRevenueNet', txt)
+    if ebit == 0:
+        # EBIT = Gross-Profit – Operating-Expenses (both almost always present)
+        gross  = grab(r'GrossProfit|GrossMargin', txt)
+        op_exp = grab(r'OperatingExpenses|SellingGeneralAndAdministrativeExpense', txt)
+        ebit   = gross - op_exp if gross and op_exp else 0
+    if dep == 0:
+        # D&A sometimes buried in “Costs and Expenses” detail
+        dep = grab(r'DepreciationExpense|AmortizationOfIntangibles', txt)
+    if capex == 0:
+        # PP&E purchases
+        capex = grab(r'PaymentsForCapital Expenditures|PurchaseOfPpe', txt)
+
+    # 6. Ultimate fallback → Yahoo historical
+    if rev == 0 or ebit == 0:
+        info = yf.Ticker(ticker).get_info()
+        rev   = info.get('totalRevenue', 0)/1e9
+        ebit  = info.get('operatingIncome', 0)/1e9
+        dep   = info.get('depreciation', 0)/1e9
+        capex = info.get('capitalExpenditures', 0)/1e9
+
     return rev, ebit, dep, capex
 
 # ---------- sidebar inputs ----------
@@ -27,7 +63,7 @@ with st.sidebar:
 if not (url and ticker_sym):
     st.stop()
 
-rev0, ebit0, dep0, capex0 = pull_financials(url)
+rev0, ebit0, dep0, capex0 = pull_financials(url, ticker_sym)
 info = yf.Ticker(ticker_sym).info
 
 # ---------- market / WACC ----------
