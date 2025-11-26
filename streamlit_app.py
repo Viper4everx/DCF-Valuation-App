@@ -3,6 +3,7 @@ import pandas as pd
 import yfinance as yf
 import requests
 import re
+from io import StringIO
 
 # --------------------------------------------------
 #  CONFIG & CSS
@@ -30,83 +31,98 @@ div[data-testid="stExpander"] { background-color: rgba(255,255,255,0.02); border
 st.markdown('<h1 style="text-align:center; margin-bottom: 30px;">SEC 10-K ➜ DCF Model</h1>', unsafe_allow_html=True)
 
 # --------------------------------------------------
-#  LOGIC: AGGRESSIVE SCRAPER
+#  LOGIC: PANDAS TABLE PARSER (ROBUST)
 # --------------------------------------------------
 @st.cache_data(show_spinner=False)
 def fetch_text(url):
     try:
-        # User-Agent is critical for SEC.gov
         headers = {'User-Agent': 'AnalystTool contact@admin.com'} 
         return requests.get(url, headers=headers).text
     except:
         return ""
 
-def clean_html_block(html_snippet):
-    """Removes HTML tags to leave just the numbers and text."""
-    # Replace line breaks and tabs with spaces
-    clean = re.sub(r'[\r\n\t]+', ' ', html_snippet)
-    # Remove HTML tags
-    clean = re.sub(r'<[^>]+>', ' ', clean)
-    # Collapse multiple spaces
-    clean = re.sub(r'\s+', ' ', clean)
-    return clean.strip()
-
-def extract_year_0(txt):
+def clean_value(val):
     """
-    1. Finds the keyword.
-    2. Grabs the next 2000 characters.
-    3. Strips HTML.
-    4. Finds the first number pattern.
+    Cleans a table cell value to a float.
+    Handles: (123), 123,456, $123
+    Returns None if it's a Year (2022-2025) or not a number.
     """
-    def find_val(keywords):
-        # Join keywords into a regex OR pattern
-        pattern = r'(' + '|'.join(keywords) + r')'
-        # Find the label in the document (ignore case)
-        matches = list(re.finditer(pattern, txt, re.IGNORECASE))
+    if isinstance(val, (int, float)):
+        # If it's a year-like integer, ignore it
+        if 1990 < val < 2030: return None
+        return float(val)
+    
+    val = str(val).strip()
+    
+    # Handle parentheses for negatives
+    is_neg = False
+    if '(' in val and ')' in val:
+        is_neg = True
         
-        if not matches:
-            return 0.0
-        
-        # We look at the LAST match first (often the consolidated table is at the end)
-        # or iterate through them until we find a valid number.
-        for m in matches:
-            # Grab a chunk of text AFTER the keyword match
-            start_idx = m.end()
-            # 1500 chars should cover the row even with heavy HTML
-            snippet = txt[start_idx : start_idx + 1500]
-            
-            # Clean HTML tags out of the snippet
-            clean_text = clean_html_block(snippet)
-            
-            # Look for number: 
-            # Matches: 123,456 or (123,456)
-            # We enforce at least one comma to avoid matching years (2024) or page numbers
-            num_match = re.search(r'\(?(\d{1,3}(?:,\d{3})+)\)?', clean_text)
-            
-            if num_match:
-                val_str = num_match.group(1).replace(',', '')
-                val = float(val_str)
-                
-                # Handle parentheses for negative
-                full_str = num_match.group(0)
-                if '(' in full_str and ')' in full_str:
-                    val = -val
-                    
-                # Sanity Check: If number is huge (>1 trillion), it might be wrong units, 
-                # but we'll assume Millions -> Billions conversion
-                return val / 1000 
-                
-        return 0.0
+    # Remove junk characters
+    clean = re.sub(r'[^\d\.]', '', val)
+    
+    if not clean: return None
+    
+    try:
+        num = float(clean)
+        # Filter out Years (e.g. 2023 appearing in header)
+        if 1990 < num < 2030 and num.is_integer():
+            return None
+        return -num if is_neg else num
+    except:
+        return None
 
-    # Define synonyms for each metric
-    return {
-        'Revenue': find_val([r'Total\s+Net\s+Sales', r'Net\s+Sales', r'Total\s+Revenues', r'Revenue']),
-        'EBIT': find_val([r'Operating\s+Income', r'Operating\s+Profit', r'Loss\s+from\s+operations', r'Income\s+from\s+operations']),
-        'Depreciation': find_val([r'Depreciation\s+and\s+amortization', r'Depreciation\s+expense']),
-        'Capex': abs(find_val([r'Capital\s+expenditures', r'Additions\s+to\s+property', r'Purchase\s+of\s+property'])),
-        'Debt': find_val([r'Total\s+Debt', r'Long-term\s+debt', r'Notes\s+payable']),
-        'Cash': find_val([r'Cash\s+and\s+cash\s+equivalents', r'Total\s+cash'])
+def extract_year_0(html_text):
+    """
+    Parses ALL tables in the HTML.
+    Looks for row labels matching keywords.
+    Grabs the first valid number in that row.
+    """
+    try:
+        # Read all tables from HTML
+        dfs = pd.read_html(StringIO(html_text), flavor='lxml')
+    except Exception as e:
+        st.error(f"Could not parse HTML tables: {e}")
+        return {}
+
+    data = {k: 0.0 for k in ['Revenue', 'EBIT', 'Depreciation', 'Capex', 'Debt', 'Cash']}
+    
+    # regex patterns for row labels
+    patterns = {
+        'Revenue': r'Total\s+Net\s+Sales|Net\s+Sales|Total\s+Revenues|Revenue',
+        'EBIT': r'Operating\s+Income|Operating\s+Profit|Loss\s+from\s+operations|Income\s+from\s+operations',
+        'Depreciation': r'Depreciation\s+and\s+amortization|Depreciation\s+expense',
+        'Capex': r'Capital\s+expenditures|Additions\s+to\s+property|Purchase\s+of\s+property',
+        'Debt': r'Total\s+Debt|Long-term\s+debt|Notes\s+payable',
+        'Cash': r'Cash\s+and\s+cash\s+equivalents|Total\s+cash'
     }
+    
+    # Iterate through every table found in the 10-K
+    for df in dfs:
+        # Convert entire dataframe to string to search
+        # If the table is tiny or empty, skip
+        if df.shape[1] < 2: continue
+        
+        # Iterate over rows
+        for idx, row in df.iterrows():
+            row_label = str(row[0]) # First column is usually the label
+            
+            for key, pattern in patterns.items():
+                # If we haven't found this value yet OR we found a 0 and want to try again
+                if data[key] == 0.0:
+                    if re.search(pattern, row_label, re.IGNORECASE):
+                        # Found a row label! Now look for the number in subsequent columns.
+                        for col_val in row[1:]:
+                            val = clean_value(col_val)
+                            if val is not None:
+                                # We found a valid number.
+                                # Assume Millions -> Billions
+                                data[key] = val / 1000
+                                # Force Capex to be positive for the model logic (subtracted later)
+                                if key == 'Capex': data[key] = abs(data[key])
+                                break 
+    return data
 
 # --------------------------------------------------
 #  UI: INPUTS
@@ -120,18 +136,15 @@ if 'y0' not in st.session_state:
     st.session_state.y0 = {k:0.0 for k in ['Revenue','EBIT','Depreciation','Capex','Debt','Cash']}
 
 if url:
-    with st.spinner("Scraping Financials (Aggressive Mode)..."):
+    with st.spinner("Parsing Tables (Pandas Mode)..."):
         txt = fetch_text(url)
         if txt:
             d = extract_year_0(txt)
             if d['Revenue'] != 0: 
                 st.session_state.y0 = d
-                st.toast("✅ Data Scraped Successfully!", icon="💰")
+                st.toast("✅ Data Extracted from Tables!", icon="📊")
             else:
-                st.error("Scraper couldn't find a Revenue number with commas. Check the debug section below.")
-                with st.expander("Scraper Debug Info"):
-                    st.write("First 500 chars of text fetched:")
-                    st.code(txt[:500])
+                st.error("Could not find Revenue in any table. Try entering manually.")
 
 # Live Price
 cur_price, shares_def = 0.0, 1.0
