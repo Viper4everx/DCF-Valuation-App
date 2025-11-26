@@ -1,21 +1,9 @@
 import streamlit as st, pandas as pd, yfinance as yf, requests, re
 st.set_page_config(page_title="DCF Model", layout="wide")
 
-# ---------- theme ----------
-st.markdown("""
-<style>
-    .metric-card {background-color:#f0f2f6;padding:12px;border-radius:8px;margin-bottom:12px;}
-    .over {color:#d32f2f;font-weight:bold;}
-    .under{color:#388e3c;font-weight:bold;}
-    .fair {color:#f57c00;font-weight:bold;}
-</style>
-""", unsafe_allow_html=True)
+st.title("SEC 10-K ➜ Full DCF (values in \$ M)")   # subtle reminder
 
-st.title("SEC 10-K ➜ Full DCF (Gordon + EBITDA exit)")
-
-# --------------------------------------------------
-#  ROBUST FINANCIAL PULL (same as before)
-# --------------------------------------------------
+# ---------- helpers ----------
 def get_txt(url):
     return requests.get(url, headers={'User-Agent':'Mozilla'}).text
 
@@ -45,7 +33,7 @@ def pull_financials(url, ticker):
         capex = info.get('capitalExpenditures', 0)/1e9
     return rev, ebit, dep, capex
 
-# ---------- sidebar inputs ----------
+# ---------- sidebar ----------
 with st.sidebar:
     url = st.text_input("SEC 10-K URL:", placeholder="https://www.sec.gov/Archives/edgar/data/...")
     ticker_sym = st.text_input("Yahoo ticker:", "AAPL").upper()
@@ -56,7 +44,6 @@ if not (url and ticker_sym):
 rev0, ebit0, dep0, capex0 = pull_financials(url, ticker_sym)
 info = yf.Ticker(ticker_sym).info
 
-# ---------- market data ----------
 beta = info.get('beta', 1.1); rf = 0.042; mkt = 0.10
 re = rf + beta*(mkt-rf); rd = 0.045; tax = 0.21
 debt = info.get('totalDebt', 0)/1e9; cash = info.get('totalCash', 0)/1e9
@@ -64,8 +51,7 @@ shares = info.get('sharesOutstanding', 1e9)/1e9; net_debt = debt - cash
 mcap = info.get('marketCap', 1e12)/1e9; total_v = mcap + net_debt
 wacc = (re*(mcap/total_v)) + (rd*(1-tax)*(net_debt/total_v))
 
-# ---------- drivers (collapsible) ----------
-with st.sidebar.expander("Projection drivers", expanded=True):
+with st.sidebar.expander("Drivers", expanded=True):
     g_rev  = st.slider("Revenue growth %", 0, 15, 6)/100
     margin = st.slider("EBIT margin %", 5, 35, 20)/100
     capex_r= st.slider("Capex % revenue", 2, 10, 4)/100
@@ -79,8 +65,8 @@ for y in years:
     rev  = rev_prev*(1+g_rev); ebit = rev*margin; tax_paid = ebit*tax; nopat = ebit - tax_paid
     d_a  = dep0*(1+g_rev)**y; capex= rev*capex_r; dnwc = (rev - rev_prev)*nwc_r
     fcf  = nopat + d_a - capex - dnwc
-    proj.append({'Year':y, 'Revenue':rev, 'EBIT':ebit, 'Taxes':tax_paid, 'NOPAT':nopat,
-                 'D&A':d_a, 'Capex':capex, 'ΔNWC':dnwc, 'FCFF':fcf})
+    proj.append({'Year':y, 'Revenue':rev, 'EBIT':ebit, 'Taxes':tax_paid,
+                 'NOPAT':nopat, 'D&A':d_a, 'Capex':capex, 'ΔNWC':dnwc, 'FCFF':fcf})
     rev_prev = rev
 df = pd.DataFrame(proj).set_index('Year')
 df['Discount Factor'] = [(1/(1+wacc))**y for y in years]
@@ -96,23 +82,22 @@ current = info.get('currentPrice', 0); mos = (price_avg - current)/current
 
 # ---------- top metrics ----------
 col1, col2, col3, col4, col5 = st.columns(5)
-col1.metric("Fair price (avg)", f"${price_avg:.2f}")
-col2.metric("Current price", f"${current:.2f}")
+col1.metric("Fair price (avg)", f"{price_avg*1000:.0f}")   # already in M
+col2.metric("Current price", f"{current*1000:.0f}")
 col3.metric("MoS", f"{mos:+.1%}")
 col4.metric("WACC", f"{wacc:.1%}")
-col5.metric("Beta", f"{info.get('beta',1.1):.2f}")
+col5.metric("Beta", f"{beta:.2f}")
 
 # ---------- tabs ----------
 tab1, tab2 = st.tabs(["📈 Gordon Growth", "📊 EBITDA Exit"])
 
 def bridge_table(ev_tv, label):
-    eq = ev_tv + cash - debt
-    price = eq/shares
+    eq = ev_tv + cash - debt; price = eq/shares
     br = pd.DataFrame({'Component':['PV of 5-yr FCFF', f'PV of Terminal Value ({label})',
                                     'Enterprise Value','Less: Net Debt','Equity Value','÷ Shares Outstanding'],
-                       '$ M':[pv_5y_fcf, ev_tv - pv_5y_fcf, ev_tv, net_debt, eq, shares],
-                       'Per-Share':[None, None, None, None, None, price]})
-    return br.style.format({"$ M":"{:,.0f}","Per-Share":"${:.2f}"})
+                       'Value':[pv_5y_fcf, ev_tv - pv_5y_fcf, ev_tv, net_debt, eq, shares],
+                       'Per-Share':[None, None, None, None, None, price*1000]})  # scale to 000
+    return br.style.format({"Value":"{:,.0f}","Per-Share":"{:,.0f}"})
 
 def cashflow_table():
     return df[['Revenue','EBIT','Taxes','NOPAT','D&A','Capex','ΔNWC','FCFF','Discount Factor','PV of FCFF']].T.style.format("{:,.0f}")
@@ -120,9 +105,9 @@ def cashflow_table():
 with tab1:
     st.header("Perpetuity Growth Valuation")
     c1, c2 = st.columns(2)
-    c1.metric("Implied share price", f"${price_gordon:.2f}")
-    c1.metric("Enterprise Value", f"${ev_gordon:,.0f}M")
-    st.subheader("Projected Free Cash Flow ($ M)")
+    c1.metric("Implied share price", f"{price_gordon*1000:.0f}")
+    c1.metric("Enterprise Value", f"{ev_gordon:,.0f}")
+    st.subheader("Projected Free Cash Flow (000)")
     st.dataframe(cashflow_table())
     st.subheader("Valuation Bridge (Gordon)")
     st.dataframe(bridge_table(ev_gordon, "Gordon"))
@@ -130,13 +115,14 @@ with tab1:
 with tab2:
     st.header("EBITDA Exit Multiple Valuation")
     c1, c2 = st.columns(2)
-    c1.metric("Implied share price", f"${price_exit:.2f}")
-    c1.metric("Enterprise Value", f"${ev_exit:,.0f}M")
-    st.subheader("Projected Free Cash Flow ($ M)")
+    c1.metric("Implied share price", f"{price_exit*1000:.0f}")
+    c1.metric("Enterprise Value", f"{ev_exit:,.0f}")
+    st.subheader("Projected Free Cash Flow (000)")
     st.dataframe(cashflow_table())
     st.subheader("Valuation Bridge (EBITDA Exit)")
     st.dataframe(bridge_table(ev_exit, "Exit"))
 
 # ---------- verdict ----------
 verdict = "🔴 Over-valued" if mos < -0.10 else "🟢 Under-valued" if mos > 0.25 else "🟡 Fair-valued"
-st.markdown(f'<p class="{verdict[2:5]}">{verdict}</p>', unsafe_allow_html=True)
+st.divider()
+st.markdown(f"**Current market price (000):** {current*1000:.0f}  **Margin of safety:** {mos:+.1%}  {verdict}")
