@@ -61,25 +61,24 @@ def get_yahoo_data(ticker):
         price = tk.fast_info.last_price or 0.0
         shares = (tk.fast_info.shares / 1e9) or 1.0 # Billions
         
-        # 2. Currency Detection
-        # e.g. Price in 'USD', Financials in 'CNY'
+        # 2. Currency Logic (Auto-Convert to Price Currency)
         price_curr = info.get('currency', 'USD')
         fin_curr = info.get('financialCurrency', price_curr)
         
         fx_rate = 1.0
         fx_msg = ""
         
+        # If Financials (CNY) != Price (USD), fetch FX rate
         if price_curr != fin_curr:
-            # Construct pair, e.g., "CNYUSD=X" to convert CNY -> USD
-            pair = f"{fin_curr}{price_curr}=X"
+            pair = f"{fin_curr}{price_curr}=X" # e.g. CNYUSD=X
             try:
                 fx = yf.Ticker(pair)
                 rate = fx.fast_info.last_price
                 if rate:
                     fx_rate = rate
-                    fx_msg = f"Converted {fin_curr} to {price_curr} at rate {fx_rate:.4f}"
+                    fx_msg = f"Converted {fin_curr} financials to {price_curr} (Rate: {fx_rate:.3f})"
             except:
-                fx_msg = f"Could not fetch FX rate for {pair}. Data is in {fin_curr}."
+                fx_msg = f"⚠️ Could not fetch FX for {pair}. Data remains in {fin_curr}."
 
         # 3. Financial Statements
         inc = tk.income_stmt
@@ -93,7 +92,7 @@ def get_yahoo_data(ticker):
             return 0.0
 
         data = {}
-        # Convert to BILLIONS and apply FX Rate
+        # Convert to BILLIONS and apply FX conversion
         factor = fx_rate / 1e9
         
         data['Revenue'] = get_val(inc, ['Total Revenue', 'Total Net Sales']) * factor
@@ -119,16 +118,16 @@ def get_yahoo_data(ticker):
 # 3. UI: INPUTS
 # ==========================================
 c_tick, c_space = st.columns([1, 4])
-ticker = c_tick.text_input("Ticker", "JD").upper()
+ticker = c_tick.text_input("Ticker", "NVDA").upper()
 
 # Initialize Session State
 if 'y0' not in st.session_state:
     st.session_state.y0 = {k:0.0 for k in ['Revenue','EBIT','Depreciation','Capex','Debt','Cash']}
 
-# Auto-Fetch Logic
-fx_info_text = ""
 curr_symbol = "$"
+fx_info = ""
 
+# Auto-Fetch Logic
 if ticker:
     with st.spinner(f"Fetching data for {ticker}..."):
         if 'last_ticker' not in st.session_state or st.session_state.last_ticker != ticker:
@@ -148,14 +147,14 @@ if ticker:
         else:
             cur_price = st.session_state.last_price
             shares_def = st.session_state.last_shares
+            fx_info = st.session_state.get('fx_msg', "")
+            curr_code = st.session_state.get('currency', 'USD')
             
-    # Display FX Info
+            # Set Symbol
+            curr_symbol = "€" if curr_code == 'EUR' else "£" if curr_code == 'GBP' else "¥" if curr_code in ['CNY','JPY'] else "$"
+
     if st.session_state.get('fx_msg'):
         st.info(f"💱 {st.session_state.fx_msg}")
-        
-    # Set Currency Symbol
-    curr_code = st.session_state.get('currency', 'USD')
-    curr_symbol = "€" if curr_code == 'EUR' else "£" if curr_code == 'GBP' else "¥" if curr_code in ['CNY','JPY'] else "$"
 
 # Year 0 Form
 st.markdown("### Year 0: Base Financials (Billions)")
@@ -173,22 +172,45 @@ with st.expander("Expand to edit Year 0 Data", expanded=True):
         st.form_submit_button("Update Model")
 
 # ==========================================
-# 4. DRIVERS & LOGIC
+# 4. SMART DRIVERS & LOGIC
 # ==========================================
 with st.sidebar:
     st.header("Assumptions")
+    
+    # WACC INPUT
     wacc = st.number_input("WACC %", value=9.0, step=0.1, format="%.1f") / 100
+    
     st.divider()
     st.subheader("Drivers")
-    g_rev = st.number_input("Revenue Growth %", value=5.0, step=0.5, format="%.1f") / 100
     
-    # Dynamic Margin Default
-    m_def = (e_in/r_in*100) if r_in > 0 else 20.0
+    # --- SMART DEFAULTS LOGIC ---
+    # Calculate current margin to guess the "Company Type"
+    current_margin = (e_in / r_in) if r_in > 0 else 0.0
+    
+    # Default Logic: High Margin = High Growth/Multiple assumption
+    if current_margin > 0.30:   # Tech / Software
+        def_growth, def_mult = 15.0, 25.0
+    elif current_margin < 0.10: # Retail / Commodity
+        def_growth, def_mult = 3.0, 8.0
+    else:                       # Average
+        def_growth, def_mult = 5.0, 12.0
+    # ----------------------------
+
+    # REVENUE GROWTH INPUT
+    g_rev = st.number_input("Revenue Growth %", value=def_growth, step=0.5, format="%.1f") / 100
+    
+    # MARGIN INPUT (Dynamic Default)
+    m_def = (current_margin * 100)
     margin_tgt = st.number_input("EBIT Margin %", value=float(f"{m_def:.1f}"), step=0.5, format="%.1f") / 100
     
+    # TAX RATE INPUT
     tax_rate = st.number_input("Tax Rate %", value=21.0, step=1.0, format="%.1f") / 100
-    ltg = st.number_input("Terminal Growth %", value=2.0, step=0.1, format="%.1f") / 100
-    exit_mult = st.number_input("Exit Multiple (x)", value=12.0, step=0.5, format="%.1f")
+    
+    # TERMINAL GROWTH INPUT
+    ltg = st.number_input("Terminal Growth %", value=2.5, step=0.1, format="%.1f") / 100
+    
+    # EXIT MULTIPLE INPUT
+    exit_mult = st.number_input("Exit Multiple (x)", value=def_mult, step=0.5, format="%.1f")
 
 # Calculations
 years = range(1, 6)
@@ -258,7 +280,7 @@ if cur_price > 0 and r_in > 0:
     """, unsafe_allow_html=True)
 
 # B. STATIC HTML TABLE
-st.subheader(f"Projected Free Cash Flow (Millions {curr_code})")
+st.subheader(f"Projected Free Cash Flow (Millions {curr_symbol})")
 
 # Convert to Millions and transpose
 df_display = (df * 1000).T
