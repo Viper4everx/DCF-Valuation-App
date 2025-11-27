@@ -19,26 +19,19 @@ body{font-family:'Inter',sans-serif;background:linear-gradient(135deg,#1e1e2f 0%
 .val-card { background: rgba(255,255,255,0.03); border-radius: 12px; padding: 24px; border: 1px solid rgba(255,255,255,0.08); height: 100%; transition: transform 0.2s; }
 .val-card:hover { transform: translateY(-3px); }
 
-/* Accents */
+/* Accents & Status */
 .border-purple { border-left: 5px solid #8b5cf6; } .text-purple { color: #a78bfa; }
 .border-green { border-left: 5px solid #10b981; } .text-green { color: #34d399; }
-.border-blue { border-left: 5px solid #3b82f6; } .text-blue { color: #60a5fa; }
-
-/* Status Colors for MoS */
-.status-under { color: #4ade80; font-weight: 700; } /* Green */
-.status-over { color: #f87171; font-weight: 700; }  /* Red */
+.status-under { color: #4ade80; font-weight: 700; }
+.status-over { color: #f87171; font-weight: 700; }
 
 /* Typography */
 .val-title { font-size: 18px; font-weight: 600; margin-bottom: 4px; color: #fff; }
-.val-sub { font-size: 12px; opacity: 0.6; margin-bottom: 20px; }
 .val-label { font-size: 11px; font-weight: 700; opacity: 0.5; letter-spacing: 1px; text-transform: uppercase; }
 .val-price { font-size: 42px; font-weight: 700; margin: 4px 0 16px 0; color: #fff; }
-.val-ev { font-size: 14px; opacity: 0.8; display: flex; justify-content: space-between; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 12px; }
 
 /* Streamlit Overrides */
 div[data-testid="stExpander"] { background-color: rgba(255,255,255,0.02); border-radius: 12px; }
-
-/* CENTER TABLE HEADERS */
 th { text-align: center !important; }
 </style>
 """, unsafe_allow_html=True)
@@ -46,21 +39,28 @@ th { text-align: center !important; }
 st.markdown('<h1 style="text-align:center; margin-bottom: 30px;">SEC 10-K ➜ DCF Model</h1>', unsafe_allow_html=True)
 
 # --------------------------------------------------
-#  LOGIC: NUCLEAR TEXT-BLOB SCRAPER
+#  LOGIC: NUCLEAR TEXT-BLOB SCRAPER (V3)
 # --------------------------------------------------
 @st.cache_data(show_spinner=False)
 def fetch_text_blob(url):
     try:
+        # 1. FIX THE URL (Handle iXBRL viewer)
         if "ix?doc=" in url:
             clean_path = url.split("doc=")[-1]
-            url = "https://www.sec.gov" + clean_path if clean_path.startswith("/") else clean_path
+            if clean_path.startswith("/"):
+                url = "https://www.sec.gov" + clean_path
+            else:
+                url = clean_path
             
         headers = {'User-Agent': 'AnalystTool contact@admin.com'} 
         html = requests.get(url, headers=headers).text
         
-        text = html.replace('&nbsp;', ' ').replace('&#160;', ' ')
+        # 2. NUCLEAR CLEANING
+        # Add spaces around tags to prevent "Revenue</td><td>2000" becoming "Revenue2000"
+        text = html.replace('>', '> ') 
+        text = text.replace('&nbsp;', ' ').replace('&#160;', ' ')
         text = re.sub(r'<(script|style)[^>]*>.*?</\1>', ' ', text, flags=re.DOTALL) 
-        text = re.sub(r'<[^>]+>', '   ', text) 
+        text = re.sub(r'<[^>]+>', ' ', text) 
         text = re.sub(r'\s+', ' ', text) 
         return text
     except:
@@ -68,31 +68,48 @@ def fetch_text_blob(url):
 
 def extract_from_blob(blob):
     data = {k: 0.0 for k in ['Revenue', 'EBIT', 'Depreciation', 'Capex', 'Debt', 'Cash']}
-    
-    def find_near(keywords):
+    debug_log = [] # Store snippets for the user to see if it fails
+
+    def find_near(keywords, metric_name):
         for kw in keywords:
+            # Find all start indices of the keyword
             matches = [m.start() for m in re.finditer(re.escape(kw), blob, re.IGNORECASE)]
+            
             for pos in matches:
-                snippet = blob[pos:pos+500]
+                # Grab a larger snippet to be safe
+                snippet = blob[pos:pos+600]
+                
+                # Regex: Look for 123,456 or (123,456). 
+                # MUST have a comma. This filters out years like 2024.
                 nums = re.findall(r'\(?(\d{1,3}(?:,\d{3})+)\)?', snippet)
+                
+                # Log the find for debugging
+                if len(debug_log) < 5:
+                    debug_log.append(f"Found keyword '{kw}': ...{snippet[:50]}...")
+
                 for n in nums:
                     val_str = n.replace(',', '')
                     try:
                         val = float(val_str)
-                        if 1900 < val < 2100: continue
-                        if f"({n})" in snippet: val = -val
+                        # We removed the year filter because the comma regex handles it.
+                        # (e.g. 2,024 matches, 2024 does not)
+                        
+                        if f"({n})" in snippet: val = -val # Handle negatives
+                        
+                        # Return valid number
                         return val / 1000 # Millions -> Billions
                     except: continue
         return 0.0
 
-    data['Revenue'] = find_near(['Total net revenue', 'Net revenue', 'Net sales', 'Total revenue'])
-    data['EBIT']    = find_near(['Operating income', 'Operating loss', 'Income from operations'])
-    data['Depreciation'] = find_near(['Depreciation and amortization', 'Depreciation expense'])
-    data['Capex']   = abs(find_near(['Purchases of property', 'Capital expenditures', 'Additions to property']))
-    data['Debt']    = find_near(['Total debt', 'Long-term debt', 'Notes payable'])
-    data['Cash']    = find_near(['Cash and cash equivalents', 'Total cash'])
+    # EXPANDED KEYWORDS LIST
+    data['Revenue'] = find_near(['Total net revenues', 'Net revenues', 'Net sales', 'Total net sales', 'Net revenue'], 'Revenue')
+    data['EBIT']    = find_near(['Operating income', 'Operating loss', 'Income from operations', 'Operating profit'], 'EBIT')
+    data['Depreciation'] = find_near(['Depreciation and amortization', 'Depreciation expense', 'Depreciation'], 'D&A')
+    data['Capex']   = abs(find_near(['Purchases of property', 'Capital expenditures', 'Additions to property', 'Acquisition of property'], 'Capex'))
+    data['Debt']    = find_near(['Total debt', 'Long-term debt', 'Notes payable'], 'Debt')
+    data['Cash']    = find_near(['Cash and cash equivalents', 'Total cash'], 'Cash')
     
-    return data
+    return data, debug_log
 
 # --------------------------------------------------
 #  UI: INPUTS
@@ -105,19 +122,25 @@ if 'y0' not in st.session_state:
     st.session_state.y0 = {k:0.0 for k in ['Revenue','EBIT','Depreciation','Capex','Debt','Cash']}
 
 if raw_url:
-    with st.spinner("Scraping (Nuclear Mode)..."):
+    with st.spinner("Scraping (Nuclear Mode V3)..."):
         blob_text = fetch_text_blob(raw_url)
         if blob_text:
-            d = extract_from_blob(blob_text)
+            d, logs = extract_from_blob(blob_text)
+            
             if d['Revenue'] != 0: 
                 st.session_state.y0 = d
                 st.toast("✅ Data Found!", icon="🔥")
             else:
                 st.error("Scraper scanned text but didn't find 'Net Revenue' followed by a valid number.")
+                with st.expander("🕵️ Debug: What the Scraper Saw"):
+                    st.write("The scraper found these keywords but rejected the numbers following them (or found no numbers):")
+                    for log in logs:
+                        st.code(log)
+                    st.write("---")
+                    st.write("Raw Text Start:")
+                    st.write(blob_text[:1000])
 
-# --------------------------------------------------
-#  LOGIC: LIVE PRICE FETCH
-# --------------------------------------------------
+# Live Price
 cur_price, shares_def = 0.0, 1.0
 if ticker:
     try:
@@ -195,26 +218,20 @@ if r_in > 0:
     fcf5 = df.loc[5,'FCFF']
     ebitda5 = df.loc[5,'EBIT'] + df.loc[5,'D&A']
     
-    # Gordon
     tv_g = fcf5 * (1+ltg)/(wacc-ltg)
     pv_tv_g = tv_g * ((1+wacc)**-5)
     ev_g = sum_pv + pv_tv_g
     eq_g = ev_g - (debt_in - cash_in)
     p_g = eq_g / shares_in
     
-    # Exit
     tv_e = ebitda5 * exit_mult
     pv_tv_e = tv_e * ((1+wacc)**-5)
     ev_e = sum_pv + pv_tv_e
     eq_e = ev_e - (debt_in - cash_in)
     p_e = eq_e / shares_in
     
-    # --- NEW: MARGIN OF SAFETY LOGIC ---
     avg_intrinsic = (p_g + p_e) / 2
-    if cur_price > 0:
-        mos_pct = (avg_intrinsic - cur_price) / cur_price
-    else:
-        mos_pct = 0.0
+    mos_pct = (avg_intrinsic - cur_price) / cur_price if cur_price > 0 else 0.0
 else:
     p_g = p_e = ev_g = ev_e = pv_tv_g = pv_tv_e = avg_intrinsic = mos_pct = 0.0
 
@@ -223,44 +240,25 @@ else:
 # --------------------------------------------------
 st.divider()
 
-# --- VERDICT / MARGIN OF SAFETY SUMMARY ---
 if cur_price > 0 and r_in > 0:
-    if mos_pct >= 0:
-        status_color = "status-under"
-        status_text = "UNDERVALUED"
-    else:
-        status_color = "status-over"
-        status_text = "OVERVALUED"
-        
+    status_color = "status-under" if mos_pct >= 0 else "status-over"
+    status_text = "UNDERVALUED" if mos_pct >= 0 else "OVERVALUED"
     st.markdown(f"""
     <div class="glass-card" style="display:flex; justify-content: space-around; align-items: center;">
-        <div style="text-align:center;">
-            <div class="val-label">CURRENT PRICE</div>
-            <div class="val-price">${cur_price:.2f}</div>
-        </div>
-        <div style="text-align:center;">
-            <div class="val-label">AVG INTRINSIC VALUE</div>
-            <div class="val-price text-blue">${avg_intrinsic:.2f}</div>
-        </div>
-        <div style="text-align:center;">
-            <div class="val-label">UPSIDE / DOWNSIDE</div>
-            <div class="val-price {status_color}">{mos_pct:+.1%}</div>
-            <div class="{status_color}" style="letter-spacing:2px;">{status_text}</div>
-        </div>
+        <div style="text-align:center;"><div class="val-label">CURRENT PRICE</div><div class="val-price">${cur_price:.2f}</div></div>
+        <div style="text-align:center;"><div class="val-label">AVG INTRINSIC VALUE</div><div class="val-price text-blue">${avg_intrinsic:.2f}</div></div>
+        <div style="text-align:center;"><div class="val-label">UPSIDE / DOWNSIDE</div><div class="val-price {status_color}">{mos_pct:+.1%}</div><div class="{status_color}">{status_text}</div></div>
     </div>
     """, unsafe_allow_html=True)
 
-# --- TABLE ---
 st.subheader("Projected Free Cash Flow (Millions USD)")
-df_display = df * 1000 # Billions -> Millions
-df_display.index = [f"Year {y}" for y in df_display.index] # Center aligned via CSS
+df_display = df * 1000 
+df_display.index = [f"Year {y}" for y in df_display.index]
 st.dataframe(df_display.T.style.format("{:,.2f}"), use_container_width=True)
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-# --- CARDS ---
 col_g, col_e = st.columns(2)
-
 with col_g:
     st.markdown(f"""<div class="val-card border-purple"><div class="val-title">Perpetuity Growth 🌊</div><div class="val-sub">Valuation based on long-term growth (g)</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-purple">${p_g:.2f}</div><div class="val-ev"><span>Enterprise Value</span><strong>${ev_g:.2f}B</strong></div></div>""", unsafe_allow_html=True)
     bridge_g = pd.DataFrame({"Component": ["PV of 5y Cash Flows", "PV of Terminal Value", "Enterprise Value", "Less: Net Debt", "Equity Value"], "Value": [sum_pv, pv_tv_g, ev_g, debt_in-cash_in, ev_g-(debt_in-cash_in)]}).set_index("Component")
