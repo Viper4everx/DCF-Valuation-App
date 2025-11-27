@@ -1,8 +1,6 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-import requests
-import re
 
 # ==========================================
 # 1. CONFIGURATION & STYLING
@@ -51,42 +49,70 @@ th { text-align: center !important; }
 st.markdown('<h1 style="text-align:center; margin-bottom: 30px;">Yahoo Finance ➜ DCF Model</h1>', unsafe_allow_html=True)
 
 # ==========================================
-# 2. DATA ENGINE (Smart FX)
+# 2. DATA ENGINE (Robust + Debugging)
 # ==========================================
 @st.cache_data(show_spinner=False)
 def get_yahoo_data(ticker):
     try:
         tk = yf.Ticker(ticker)
-        info = tk.info
         
-        # 1. Market Data
-        price = tk.fast_info.last_price or 0.0
-        shares = (tk.fast_info.shares / 1e9) or 1.0 # Billions
+        # 1. Robust Price Fetch (Try Fast, then History)
+        price = 0.0
+        try:
+            price = tk.fast_info.last_price
+        except:
+            # Fallback: Download 1 day of history
+            hist = tk.history(period="1d")
+            if not hist.empty:
+                price = hist['Close'].iloc[-1]
         
-        # 2. Currency Logic (Auto-Convert to Price Currency)
-        price_curr = info.get('currency', 'USD')
-        fin_curr = info.get('financialCurrency', price_curr)
+        if not price: price = 0.0 # Safety
+
+        # 2. Robust Shares Fetch (Try Info, then Fast)
+        shares = 0.0
+        try:
+            shares = tk.info.get('sharesOutstanding')
+        except: pass
+        
+        if not shares:
+            try: shares = tk.fast_info.shares_outstanding
+            except: pass
+            
+        if not shares: shares = 1000000000 # Default to 1B to prevent div/0 crash
+        shares = shares / 1e9 # Convert to Billions
+        
+        # 3. Currency Logic
+        try:
+            price_curr = tk.info.get('currency', 'USD')
+            fin_curr = tk.info.get('financialCurrency', price_curr)
+        except:
+            price_curr = 'USD'
+            fin_curr = 'USD'
         
         fx_rate = 1.0
         fx_msg = ""
         
-        # If Financials (CNY) != Price (USD), fetch FX rate
         if price_curr != fin_curr:
-            pair = f"{fin_curr}{price_curr}=X" # e.g. CNYUSD=X
+            pair = f"{fin_curr}{price_curr}=X"
             try:
                 fx = yf.Ticker(pair)
-                rate = fx.fast_info.last_price
-                if rate:
-                    fx_rate = rate
+                # Try getting FX rate via history if fast_info fails
+                hist_fx = fx.history(period="1d")
+                if not hist_fx.empty:
+                    fx_rate = hist_fx['Close'].iloc[-1]
                     fx_msg = f"Converted {fin_curr} financials to {price_curr} (Rate: {fx_rate:.3f})"
             except:
                 fx_msg = f"⚠️ Could not fetch FX for {pair}. Data remains in {fin_curr}."
 
-        # 3. Financial Statements
+        # 4. Financial Statements
         inc = tk.income_stmt
         bs = tk.balance_sheet
         cf = tk.cashflow
         
+        # If tables are empty, throw a specific error
+        if inc.empty:
+            raise ValueError("Yahoo returned empty financial statements.")
+
         def get_val(df, keys):
             if df.empty: return 0.0
             for k in keys:
@@ -94,27 +120,22 @@ def get_yahoo_data(ticker):
             return 0.0
 
         data = {}
-        # Convert to BILLIONS and apply FX conversion
         factor = fx_rate / 1e9
         
         data['Revenue'] = get_val(inc, ['Total Revenue', 'Total Net Sales']) * factor
         data['EBIT']    = get_val(inc, ['Operating Income', 'EBIT', 'Operating Profit']) * factor
-        
-        # D&A
         data['Depreciation'] = get_val(cf, ['Depreciation And Amortization']) * factor
         if data['Depreciation'] == 0:
              data['Depreciation'] = get_val(inc, ['Reconciled Depreciation']) * factor
-
-        # Capex
         data['Capex'] = abs(get_val(cf, ['Capital Expenditure', 'Capital Expenditures'])) * factor
-        
-        # Balance Sheet
         data['Debt'] = get_val(bs, ['Total Debt', 'Long Term Debt And Capital Lease Obligation']) * factor
         data['Cash'] = get_val(bs, ['Cash And Cash Equivalents', 'Cash, Cash Equivalents And Short Term Investments']) * factor
         
         return data, price, shares, fx_msg, price_curr
-    except:
-        return None, 0.0, 1.0, "", "USD"
+
+    except Exception as e:
+        # Return the error message so we can print it
+        return None, 0.0, 1.0, str(e), "USD"
 
 # ==========================================
 # 3. UI: INPUTS
@@ -142,7 +163,8 @@ if ticker:
                 st.session_state.fx_msg = fx_msg
                 st.session_state.currency = currency
             else:
-                st.error("Ticker not found on Yahoo Finance.")
+                # PRINT THE ACTUAL ERROR MESSAGE
+                st.error(f"Ticker error: {fx_msg}") # fx_msg holds the error string in failure case
                 cur_price, shares_def = 0.0, 1.0
                 st.session_state.fx_msg = ""
                 st.session_state.currency = "USD"
@@ -180,7 +202,7 @@ with st.sidebar:
     st.header("Assumptions")
     
     # WACC INPUT
-    # Use ticker key to reset default if needed, though usually WACC isn't auto-derived
+    # Use ticker key to reset default if needed
     wacc = st.number_input("WACC %", value=9.0, step=0.1, format="%.1f", key=f"wacc_{ticker}") / 100
     
     st.divider()
