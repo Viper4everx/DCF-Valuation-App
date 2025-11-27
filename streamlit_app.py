@@ -47,7 +47,7 @@ th { text-align: center !important; }
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<h1 style="text-align:center; margin-bottom: 30px;">Yahoo Finance ➜ DCF Model</h1>', unsafe_allow_html=True)
+st.markdown('<h1 style="text-align:center; margin-bottom: 30px;">DCF Valuation Tool</h1>', unsafe_allow_html=True)
 
 # ==========================================
 # 2. DATA ENGINE (Smart FX + Industry)
