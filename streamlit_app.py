@@ -49,24 +49,43 @@ th { text-align: center !important; }
 st.markdown('<h1 style="text-align:center; margin-bottom: 30px;">Yahoo Finance ➜ DCF Model</h1>', unsafe_allow_html=True)
 
 # ==========================================
-# 2. DATA ENGINE (Yahoo Finance)
+# 2. DATA ENGINE (Smart FX)
 # ==========================================
 @st.cache_data(show_spinner=False)
 def get_yahoo_data(ticker):
-    """Pull financials directly from Yahoo Finance."""
     try:
         tk = yf.Ticker(ticker)
+        info = tk.info
         
-        # Market Data
+        # 1. Market Data
         price = tk.fast_info.last_price or 0.0
         shares = (tk.fast_info.shares / 1e9) or 1.0 # Billions
         
-        # Financial Statements
+        # 2. Currency Detection
+        # e.g. Price in 'USD', Financials in 'CNY'
+        price_curr = info.get('currency', 'USD')
+        fin_curr = info.get('financialCurrency', price_curr)
+        
+        fx_rate = 1.0
+        fx_msg = ""
+        
+        if price_curr != fin_curr:
+            # Construct pair, e.g., "CNYUSD=X" to convert CNY -> USD
+            pair = f"{fin_curr}{price_curr}=X"
+            try:
+                fx = yf.Ticker(pair)
+                rate = fx.fast_info.last_price
+                if rate:
+                    fx_rate = rate
+                    fx_msg = f"Converted {fin_curr} to {price_curr} at rate {fx_rate:.4f}"
+            except:
+                fx_msg = f"Could not fetch FX rate for {pair}. Data is in {fin_curr}."
+
+        # 3. Financial Statements
         inc = tk.income_stmt
         bs = tk.balance_sheet
         cf = tk.cashflow
         
-        # Helper to safely grab the most recent year (Column 0)
         def get_val(df, keys):
             if df.empty: return 0.0
             for k in keys:
@@ -74,52 +93,69 @@ def get_yahoo_data(ticker):
             return 0.0
 
         data = {}
-        # Convert everything to BILLIONS for the input form
-        data['Revenue'] = get_val(inc, ['Total Revenue', 'Total Net Sales']) / 1e9
-        data['EBIT']    = get_val(inc, ['Operating Income', 'EBIT', 'Operating Profit']) / 1e9
+        # Convert to BILLIONS and apply FX Rate
+        factor = fx_rate / 1e9
+        
+        data['Revenue'] = get_val(inc, ['Total Revenue', 'Total Net Sales']) * factor
+        data['EBIT']    = get_val(inc, ['Operating Income', 'EBIT', 'Operating Profit']) * factor
         
         # D&A
-        data['Depreciation'] = get_val(cf, ['Depreciation And Amortization']) / 1e9
+        data['Depreciation'] = get_val(cf, ['Depreciation And Amortization']) * factor
         if data['Depreciation'] == 0:
-             data['Depreciation'] = get_val(inc, ['Reconciled Depreciation']) / 1e9
+             data['Depreciation'] = get_val(inc, ['Reconciled Depreciation']) * factor
 
-        # Capex (Positive for logic)
-        data['Capex'] = abs(get_val(cf, ['Capital Expenditure', 'Capital Expenditures'])) / 1e9
+        # Capex
+        data['Capex'] = abs(get_val(cf, ['Capital Expenditure', 'Capital Expenditures'])) * factor
         
         # Balance Sheet
-        data['Debt'] = get_val(bs, ['Total Debt', 'Long Term Debt And Capital Lease Obligation']) / 1e9
-        data['Cash'] = get_val(bs, ['Cash And Cash Equivalents', 'Cash, Cash Equivalents And Short Term Investments']) / 1e9
+        data['Debt'] = get_val(bs, ['Total Debt', 'Long Term Debt And Capital Lease Obligation']) * factor
+        data['Cash'] = get_val(bs, ['Cash And Cash Equivalents', 'Cash, Cash Equivalents And Short Term Investments']) * factor
         
-        return data, price, shares
+        return data, price, shares, fx_msg, price_curr
     except:
-        return None, 0.0, 1.0
+        return None, 0.0, 1.0, "", "USD"
 
 # ==========================================
 # 3. UI: INPUTS
 # ==========================================
 c_tick, c_space = st.columns([1, 4])
-ticker = c_tick.text_input("Ticker", "AMD").upper()
+ticker = c_tick.text_input("Ticker", "JD").upper()
 
 # Initialize Session State
 if 'y0' not in st.session_state:
     st.session_state.y0 = {k:0.0 for k in ['Revenue','EBIT','Depreciation','Capex','Debt','Cash']}
 
 # Auto-Fetch Logic
+fx_info_text = ""
+curr_symbol = "$"
+
 if ticker:
     with st.spinner(f"Fetching data for {ticker}..."):
         if 'last_ticker' not in st.session_state or st.session_state.last_ticker != ticker:
-            d, cur_price, shares_def = get_yahoo_data(ticker)
+            d, cur_price, shares_def, fx_msg, currency = get_yahoo_data(ticker)
             if d:
                 st.session_state.y0 = d
                 st.session_state.last_price = cur_price
                 st.session_state.last_shares = shares_def
                 st.session_state.last_ticker = ticker
+                st.session_state.fx_msg = fx_msg
+                st.session_state.currency = currency
             else:
                 st.error("Ticker not found on Yahoo Finance.")
                 cur_price, shares_def = 0.0, 1.0
+                st.session_state.fx_msg = ""
+                st.session_state.currency = "USD"
         else:
             cur_price = st.session_state.last_price
             shares_def = st.session_state.last_shares
+            
+    # Display FX Info
+    if st.session_state.get('fx_msg'):
+        st.info(f"💱 {st.session_state.fx_msg}")
+        
+    # Set Currency Symbol
+    curr_code = st.session_state.get('currency', 'USD')
+    curr_symbol = "€" if curr_code == 'EUR' else "£" if curr_code == 'GBP' else "¥" if curr_code in ['CNY','JPY'] else "$"
 
 # Year 0 Form
 st.markdown("### Year 0: Base Financials (Billions)")
@@ -137,31 +173,21 @@ with st.expander("Expand to edit Year 0 Data", expanded=True):
         st.form_submit_button("Update Model")
 
 # ==========================================
-# 4. DRIVERS & LOGIC (TEXT INPUTS)
+# 4. DRIVERS & LOGIC
 # ==========================================
 with st.sidebar:
     st.header("Assumptions")
-    
-    # WACC INPUT
     wacc = st.number_input("WACC %", value=9.0, step=0.1, format="%.1f") / 100
-    
     st.divider()
     st.subheader("Drivers")
-    
-    # REVENUE GROWTH INPUT
     g_rev = st.number_input("Revenue Growth %", value=5.0, step=0.5, format="%.1f") / 100
     
-    # MARGIN INPUT (Dynamic Default)
+    # Dynamic Margin Default
     m_def = (e_in/r_in*100) if r_in > 0 else 20.0
     margin_tgt = st.number_input("EBIT Margin %", value=float(f"{m_def:.1f}"), step=0.5, format="%.1f") / 100
     
-    # TAX RATE INPUT
     tax_rate = st.number_input("Tax Rate %", value=21.0, step=1.0, format="%.1f") / 100
-    
-    # TERMINAL GROWTH INPUT
     ltg = st.number_input("Terminal Growth %", value=2.0, step=0.1, format="%.1f") / 100
-    
-    # EXIT MULTIPLE INPUT
     exit_mult = st.number_input("Exit Multiple (x)", value=12.0, step=0.5, format="%.1f")
 
 # Calculations
@@ -225,14 +251,14 @@ if cur_price > 0 and r_in > 0:
     s_txt = "UNDERVALUED" if mos_pct >= 0 else "OVERVALUED"
     st.markdown(f"""
     <div class="glass-card" style="display:flex; justify-content: space-around; align-items: center;">
-        <div style="text-align:center;"><div class="val-label">CURRENT PRICE</div><div class="val-price">${cur_price:.2f}</div></div>
-        <div style="text-align:center;"><div class="val-label">INTRINSIC VALUE</div><div class="val-price text-blue">${avg_int:.2f}</div></div>
+        <div style="text-align:center;"><div class="val-label">CURRENT PRICE</div><div class="val-price">{curr_symbol}{cur_price:.2f}</div></div>
+        <div style="text-align:center;"><div class="val-label">INTRINSIC VALUE</div><div class="val-price text-blue">{curr_symbol}{avg_int:.2f}</div></div>
         <div style="text-align:center;"><div class="val-label">UPSIDE</div><div class="val-price {s_col}">{mos_pct:+.1%}</div><div class="{s_col}">{s_txt}</div></div>
     </div>
     """, unsafe_allow_html=True)
 
 # B. STATIC HTML TABLE
-st.subheader("Projected Free Cash Flow (Millions USD)")
+st.subheader(f"Projected Free Cash Flow (Millions {curr_code})")
 
 # Convert to Millions and transpose
 df_display = (df * 1000).T
@@ -252,14 +278,14 @@ def make_bridge(pv_fcf, pv_tv, ev, debt, cash, eq):
         "Value": [pv_fcf, pv_tv, ev, debt-cash, eq]
     }).set_index("Component")
 
-bridge_config = {"Value": st.column_config.NumberColumn(format="$%.2fB")}
+bridge_config = {"Value": st.column_config.NumberColumn(format=f"{curr_symbol}%.2fB")}
 
 with c_g:
-    st.markdown(f"""<div class="val-card border-purple"><div class="val-title">Perpetuity Growth 🌊</div><div class="val-sub">Based on {safe_ltg:.1%} long-term growth</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-purple">${p_g:.2f}</div><div class="val-ev"><span>Enterprise Value</span><strong>${ev_g:.2f}B</strong></div></div>""", unsafe_allow_html=True)
+    st.markdown(f"""<div class="val-card border-purple"><div class="val-title">Perpetuity Growth 🌊</div><div class="val-sub">Based on {safe_ltg:.1%} long-term growth</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-purple">{curr_symbol}{p_g:.2f}</div><div class="val-ev"><span>Enterprise Value</span><strong>{curr_symbol}{ev_g:.2f}B</strong></div></div>""", unsafe_allow_html=True)
     st.markdown("##### Bridge (Gordon)")
-    st.dataframe(make_bridge(sum_pv, pv_tv_g, ev_g, debt_in, cash_in, ev_g-(debt_in-cash_in)).style.format("${:,.2f}B"), use_container_width=True)
+    st.dataframe(make_bridge(sum_pv, pv_tv_g, ev_g, debt_in, cash_in, ev_g-(debt_in-cash_in)), use_container_width=True, column_config=bridge_config)
 
 with c_e:
-    st.markdown(f"""<div class="val-card border-green"><div class="val-title">Exit Multiple 💼</div><div class="val-sub">Based on {exit_mult}x EBITDA multiple</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-green">${p_e:.2f}</div><div class="val-ev"><span>Enterprise Value</span><strong>${ev_e:.2f}B</strong></div></div>""", unsafe_allow_html=True)
+    st.markdown(f"""<div class="val-card border-green"><div class="val-title">Exit Multiple 💼</div><div class="val-sub">Based on {exit_mult}x EBITDA multiple</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-green">{curr_symbol}{p_e:.2f}</div><div class="val-ev"><span>Enterprise Value</span><strong>{curr_symbol}{ev_e:.2f}B</strong></div></div>""", unsafe_allow_html=True)
     st.markdown("##### Bridge (Multiple)")
-    st.dataframe(make_bridge(sum_pv, pv_tv_e, ev_e, debt_in, cash_in, ev_e-(debt_in-cash_in)).style.format("${:,.2f}B"), use_container_width=True)
+    st.dataframe(make_bridge(sum_pv, pv_tv_e, ev_e, debt_in, cash_in, ev_e-(debt_in-cash_in)), use_container_width=True, column_config=bridge_config)
