@@ -13,24 +13,16 @@ st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
 body{font-family:'Inter',sans-serif;background:linear-gradient(135deg,#1e1e2f 0%,#2a2a3e 100%);color:#f0f2f6;}
-
-/* Glassmorphic Cards */
 .glass-card { background: rgba(255,255,255,0.05); border-radius: 12px; padding: 20px; border: 1px solid rgba(255,255,255,0.1); margin-bottom: 20px; }
 .val-card { background: rgba(255,255,255,0.03); border-radius: 12px; padding: 24px; border: 1px solid rgba(255,255,255,0.08); height: 100%; transition: transform 0.2s; }
 .val-card:hover { transform: translateY(-3px); }
-
-/* Accents & Status */
 .border-purple { border-left: 5px solid #8b5cf6; } .text-purple { color: #a78bfa; }
 .border-green { border-left: 5px solid #10b981; } .text-green { color: #34d399; }
 .status-under { color: #4ade80; font-weight: 700; }
 .status-over { color: #f87171; font-weight: 700; }
-
-/* Typography */
 .val-title { font-size: 18px; font-weight: 600; margin-bottom: 4px; color: #fff; }
 .val-label { font-size: 11px; font-weight: 700; opacity: 0.5; letter-spacing: 1px; text-transform: uppercase; }
 .val-price { font-size: 42px; font-weight: 700; margin: 4px 0 16px 0; color: #fff; }
-
-/* Streamlit Overrides */
 div[data-testid="stExpander"] { background-color: rgba(255,255,255,0.02); border-radius: 12px; }
 th { text-align: center !important; }
 </style>
@@ -39,24 +31,19 @@ th { text-align: center !important; }
 st.markdown('<h1 style="text-align:center; margin-bottom: 30px;">SEC 10-K ➜ DCF Model</h1>', unsafe_allow_html=True)
 
 # --------------------------------------------------
-#  LOGIC: NUCLEAR TEXT-BLOB SCRAPER (V3)
+#  LOGIC: "WIDE-NET" SCRAPER (V4)
 # --------------------------------------------------
 @st.cache_data(show_spinner=False)
 def fetch_text_blob(url):
     try:
-        # 1. FIX THE URL (Handle iXBRL viewer)
         if "ix?doc=" in url:
             clean_path = url.split("doc=")[-1]
-            if clean_path.startswith("/"):
-                url = "https://www.sec.gov" + clean_path
-            else:
-                url = clean_path
-            
+            url = "https://www.sec.gov" + clean_path if clean_path.startswith("/") else clean_path
+        
         headers = {'User-Agent': 'AnalystTool contact@admin.com'} 
         html = requests.get(url, headers=headers).text
         
-        # 2. NUCLEAR CLEANING
-        # Add spaces around tags to prevent "Revenue</td><td>2000" becoming "Revenue2000"
+        # Clean HTML to Text
         text = html.replace('>', '> ') 
         text = text.replace('&nbsp;', ' ').replace('&#160;', ' ')
         text = re.sub(r'<(script|style)[^>]*>.*?</\1>', ' ', text, flags=re.DOTALL) 
@@ -68,44 +55,37 @@ def fetch_text_blob(url):
 
 def extract_from_blob(blob):
     data = {k: 0.0 for k in ['Revenue', 'EBIT', 'Depreciation', 'Capex', 'Debt', 'Cash']}
-    debug_log = [] # Store snippets for the user to see if it fails
+    debug_log = []
 
     def find_near(keywords, metric_name):
         for kw in keywords:
-            # Find all start indices of the keyword
             matches = [m.start() for m in re.finditer(re.escape(kw), blob, re.IGNORECASE)]
             
             for pos in matches:
-                # Grab a larger snippet to be safe
-                snippet = blob[pos:pos+600]
+                # Increased lookahead to 1000 chars to skip over text descriptions
+                snippet = blob[pos:pos+1000]
                 
-                # Regex: Look for 123,456 or (123,456). 
-                # MUST have a comma. This filters out years like 2024.
-                nums = re.findall(r'\(?(\d{1,3}(?:,\d{3})+)\)?', snippet)
+                # Updated Regex: Allows space after comma (e.g. "10, 000")
+                # Must have at least one comma to filter out years (2024)
+                nums = re.findall(r'\(?(\d{1,3}(?:,\s?\d{3})+)\)?', snippet)
                 
-                # Log the find for debugging
-                if len(debug_log) < 5:
-                    debug_log.append(f"Found keyword '{kw}': ...{snippet[:50]}...")
+                if len(debug_log) < 10:
+                    debug_log.append(f"Checked '{kw}': Found {nums[:3]}...")
 
                 for n in nums:
-                    val_str = n.replace(',', '')
+                    val_str = n.replace(',', '').replace(' ', '') # Remove comma and space
                     try:
                         val = float(val_str)
-                        # We removed the year filter because the comma regex handles it.
-                        # (e.g. 2,024 matches, 2024 does not)
-                        
                         if f"({n})" in snippet: val = -val # Handle negatives
-                        
-                        # Return valid number
                         return val / 1000 # Millions -> Billions
                     except: continue
         return 0.0
 
-    # EXPANDED KEYWORDS LIST
-    data['Revenue'] = find_near(['Total net revenues', 'Net revenues', 'Net sales', 'Total net sales', 'Net revenue'], 'Revenue')
-    data['EBIT']    = find_near(['Operating income', 'Operating loss', 'Income from operations', 'Operating profit'], 'EBIT')
-    data['Depreciation'] = find_near(['Depreciation and amortization', 'Depreciation expense', 'Depreciation'], 'D&A')
-    data['Capex']   = abs(find_near(['Purchases of property', 'Capital expenditures', 'Additions to property', 'Acquisition of property'], 'Capex'))
+    # EXPANDED KEYWORDS (For Merck/Pharma/Tech)
+    data['Revenue'] = find_near(['Total sales', 'Product sales', 'Net sales', 'Total net revenues', 'Net revenues', 'Revenue'], 'Revenue')
+    data['EBIT']    = find_near(['Operating income', 'Earnings from operations', 'Operating profit', 'Loss from operations'], 'EBIT')
+    data['Depreciation'] = find_near(['Depreciation and amortization', 'Depreciation expense'], 'D&A')
+    data['Capex']   = abs(find_near(['Additions to property', 'Capital expenditures', 'Purchases of property', 'Capital additions'], 'Capex'))
     data['Debt']    = find_near(['Total debt', 'Long-term debt', 'Notes payable'], 'Debt')
     data['Cash']    = find_near(['Cash and cash equivalents', 'Total cash'], 'Cash')
     
@@ -115,14 +95,14 @@ def extract_from_blob(blob):
 #  UI: INPUTS
 # --------------------------------------------------
 c_tick, c_url = st.columns([1, 4])
-ticker = c_tick.text_input("Ticker", "AMD").upper()
+ticker = c_tick.text_input("Ticker", "MRK").upper()
 raw_url = c_url.text_input("SEC 10-K URL", placeholder="Paste SEC link (iXBRL or HTML supported)")
 
 if 'y0' not in st.session_state:
     st.session_state.y0 = {k:0.0 for k in ['Revenue','EBIT','Depreciation','Capex','Debt','Cash']}
 
 if raw_url:
-    with st.spinner("Scraping (Nuclear Mode V3)..."):
+    with st.spinner("Scraping (Wide-Net Mode)..."):
         blob_text = fetch_text_blob(raw_url)
         if blob_text:
             d, logs = extract_from_blob(blob_text)
@@ -131,12 +111,10 @@ if raw_url:
                 st.session_state.y0 = d
                 st.toast("✅ Data Found!", icon="🔥")
             else:
-                st.error("Scraper scanned text but didn't find 'Net Revenue' followed by a valid number.")
-                with st.expander("🕵️ Debug: What the Scraper Saw"):
-                    st.write("The scraper found these keywords but rejected the numbers following them (or found no numbers):")
-                    for log in logs:
-                        st.code(log)
-                    st.write("---")
+                st.error("Scraper scanned text but didn't find Revenue. Check the debug log below.")
+                with st.expander("🕵️ Debugger"):
+                    st.write("Keywords matched but rejected (or no numbers found):")
+                    for l in logs: st.code(l)
                     st.write("Raw Text Start:")
                     st.write(blob_text[:1000])
 
