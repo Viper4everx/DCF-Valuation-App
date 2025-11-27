@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-import requests
 import re
 
 # ==========================================
@@ -14,70 +13,65 @@ st.markdown("""
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
 body { font-family: 'Inter', sans-serif; background: linear-gradient(135deg, #1e1e2f 0%, #2a2a3e 100%); color: #f0f2f6; }
 
-/* Cards */
+/* Cards & Containers */
 .glass-card { background: rgba(255,255,255,0.05); border-radius: 12px; padding: 20px; border: 1px solid rgba(255,255,255,0.1); margin-bottom: 20px; }
 .val-card { background: rgba(255,255,255,0.03); border-radius: 12px; padding: 24px; border: 1px solid rgba(255,255,255,0.08); height: 100%; transition: transform 0.2s; }
 .val-card:hover { transform: translateY(-3px); }
 
-/* Status & Text Colors */
-.status-under { color: #4ade80; font-weight: 700; }
-.status-over { color: #f87171; font-weight: 700; }
-.text-purple { color: #a78bfa; }
-.text-green { color: #34d399; }
-.text-blue { color: #60a5fa; }
-.border-purple { border-left: 5px solid #8b5cf6; }
-.border-green { border-left: 5px solid #10b981; }
-
-/* Typography */
+/* Typography & Accents */
 .val-label { font-size: 11px; font-weight: 700; opacity: 0.5; letter-spacing: 1px; text-transform: uppercase; }
 .val-price { font-size: 42px; font-weight: 700; margin: 4px 0 16px 0; color: #fff; }
 .val-title { font-size: 18px; font-weight: 600; margin-bottom: 4px; color: #fff; }
 .val-sub { font-size: 12px; opacity: 0.6; margin-bottom: 20px; }
-.val-ev { font-size: 14px; opacity: 0.8; display: flex; justify-content: space-between; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 12px; }
+.status-under { color: #4ade80; font-weight: 700; }
+.status-over { color: #f87171; font-weight: 700; }
+.text-blue { color: #60a5fa; }
+.text-purple { color: #a78bfa; }
+.text-green { color: #34d399; }
+.border-purple { border-left: 5px solid #8b5cf6; }
+.border-green { border-left: 5px solid #10b981; }
 
-/* STATIC TABLE STYLING */
+/* Custom Static Table */
 .custom-table { width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 14px; }
 .custom-table th { text-align: center; padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.2); color: rgba(255,255,255,0.8); font-weight: 600; }
 .custom-table td { text-align: right; padding: 10px; border-bottom: 1px solid rgba(255,255,255,0.05); font-family: 'Inter', monospace; }
 .custom-table tr:hover { background: rgba(255,255,255,0.02); }
 .custom-table td:first-child { text-align: left; font-weight: 600; color: rgba(255,255,255,0.9); }
 
-/* Overrides */
 div[data-testid="stExpander"] { background-color: rgba(255,255,255,0.02); border-radius: 12px; }
-th { text-align: center !important; }
 </style>
 """, unsafe_allow_html=True)
 
 st.markdown('<h1 style="text-align:center; margin-bottom: 30px;">DCF Valuation Tool</h1>', unsafe_allow_html=True)
 
 # ==========================================
-# 2. DATA ENGINE (Smart FX + Industry)
+# 2. DATA ENGINE (OPTIMIZED)
 # ==========================================
-@st.cache_data(show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_yahoo_data(ticker):
+    """Fetches financial data, handling currency conversion and missing values."""
     try:
         tk = yf.Ticker(ticker)
-        info = tk.info
         
-        # 1. Market & Meta Data
-        price = 0.0
+        # 1. Market Data (with Fallback)
         try: price = tk.fast_info.last_price
         except: 
             hist = tk.history(period="1d")
-            if not hist.empty: price = hist['Close'].iloc[-1]
+            price = hist['Close'].iloc[-1] if not hist.empty else 0.0
 
-        shares = 0.0
         try: shares = tk.info.get('sharesOutstanding')
-        except: pass
-        if not shares: shares = tk.fast_info.shares_outstanding
-        if not shares: shares = 1000000000
+        except: shares = None
+        if not shares: 
+            try: shares = tk.fast_info.shares_outstanding
+            except: pass
+        if not shares: shares = 1e9 # Default 1B to avoid div/0
         shares = shares / 1e9 
 
-        industry = info.get('industry', 'Unknown')
+        industry = tk.info.get('industry', 'Unknown')
         
-        # 2. Currency Logic (Auto-Convert to Price Currency)
-        price_curr = info.get('currency', 'USD')
-        fin_curr = info.get('financialCurrency', price_curr)
+        # 2. Currency Logic (Smart-FX)
+        price_curr = tk.info.get('currency', 'USD')
+        fin_curr = tk.info.get('financialCurrency', price_curr)
         
         fx_rate = 1.0
         fx_msg = ""
@@ -91,14 +85,14 @@ def get_yahoo_data(ticker):
                     fx_rate = rate
                     fx_msg = f"Converted {fin_curr} to {price_curr} (Rate: {fx_rate:.3f})"
             except:
-                fx_msg = f"⚠️ FX Error: Data remains in {fin_curr}."
+                fx_msg = f"⚠️ FX Error: Could not fetch rate for {pair}."
 
         # 3. Financial Statements
         inc = tk.income_stmt
         bs = tk.balance_sheet
         cf = tk.cashflow
         
-        if inc.empty: raise ValueError("Empty financials")
+        if inc.empty: raise ValueError("No financial statements found.")
 
         def get_val(df, keys):
             if df.empty: return 0.0
@@ -107,11 +101,12 @@ def get_yahoo_data(ticker):
             return 0.0
 
         data = {}
-        factor = fx_rate / 1e9
+        factor = fx_rate / 1e9 # Convert to Billions & Apply FX
         
         data['Revenue'] = get_val(inc, ['Total Revenue', 'Total Net Sales', 'Total Interest Income']) * factor
         data['EBIT']    = get_val(inc, ['Operating Income', 'EBIT', 'Operating Profit']) * factor
         
+        # D&A Strategy: CF first, then Income Statement
         data['Depreciation'] = get_val(cf, ['Depreciation And Amortization']) * factor
         if data['Depreciation'] == 0:
              data['Depreciation'] = get_val(inc, ['Reconciled Depreciation']) * factor
@@ -121,55 +116,55 @@ def get_yahoo_data(ticker):
         data['Cash'] = get_val(bs, ['Cash And Cash Equivalents', 'Cash, Cash Equivalents And Short Term Investments']) * factor
         
         return data, price, shares, fx_msg, price_curr, industry
+        
     except Exception as e:
         return None, 0.0, 1.0, str(e), "USD", "Unknown"
 
 # ==========================================
-# 3. HELPER: UNIVERSAL FILE PARSER
+# 3. FILE PARSER (ROBUST ENCODING)
 # ==========================================
 @st.cache_data
 def parse_industry_file(file):
-    """Reads CSV or Excel and finds the Industry/Multiple columns."""
+    """Reads CSV/Excel with encoding fallback for Excel-saved CSVs."""
     try:
-        # Determine file type
         if file.name.endswith('.csv'):
-            df = pd.read_csv(file)
+            try:
+                df = pd.read_csv(file)
+            except UnicodeDecodeError:
+                file.seek(0)
+                df = pd.read_csv(file, encoding='latin-1')
         else:
-            # Assumes Excel if not CSV
             df = pd.read_excel(file)
             
-        # Normalize column names
+        # Normalize headers
         df.columns = [str(c).lower().strip() for c in df.columns]
         
-        # Smart Column Finder
-        ind_col = next((c for c in df.columns if any(x in c for x in ['industry', 'sector', 'segment'])), None)
+        # Fuzzy match columns
+        ind_col = next((c for c in df.columns if any(x in c for x in ['industry', 'sector'])), None)
         mult_col = next((c for c in df.columns if any(x in c for x in ['multiple', 'exit', 'ebitda', 'x'])), None)
         
         if ind_col and mult_col:
-            # Return dict: {Industry Name : Multiple Value}
             return dict(zip(df[ind_col], df[mult_col]))
         return None
     except Exception as e:
-        st.error(f"Error parsing file: {e}")
+        st.error(f"Parser Error: {e}")
         return None
 
 # ==========================================
-# 4. UI: INPUTS & SIDEBAR
+# 4. UI: INPUTS
 # ==========================================
 c_tick, c_space = st.columns([1, 4])
 ticker = c_tick.text_input("Ticker", "NVDA").upper()
 
-# Initialize Session
 if 'y0' not in st.session_state:
     st.session_state.y0 = {k:0.0 for k in ['Revenue','EBIT','Depreciation','Capex','Debt','Cash']}
 
 curr_symbol = "$"
-fx_info = ""
 industry_name = "Unknown"
 
-# Auto-Fetch Logic
 if ticker:
-    with st.spinner(f"Fetching data for {ticker}..."):
+    with st.spinner(f"Analysing {ticker}..."):
+        # Fetch logic: Only refetch if ticker changes
         if 'last_ticker' not in st.session_state or st.session_state.last_ticker != ticker:
             d, cur_price, shares_def, fx_msg, currency, ind_name = get_yahoo_data(ticker)
             if d:
@@ -181,12 +176,13 @@ if ticker:
                 st.session_state.currency = currency
                 st.session_state.industry = ind_name
             else:
-                st.error(f"Ticker error: {fx_msg}")
+                st.error(f"Error: {fx_msg}")
                 cur_price, shares_def = 0.0, 1.0
                 st.session_state.fx_msg = ""
                 st.session_state.currency = "USD"
                 st.session_state.industry = "Unknown"
         else:
+            # Use cached session values
             cur_price = st.session_state.last_price
             shares_def = st.session_state.last_shares
             fx_info = st.session_state.get('fx_msg', "")
@@ -214,21 +210,17 @@ with st.expander("Expand to edit Year 0 Data", expanded=True):
         st.form_submit_button("Update Model")
 
 # ==========================================
-# 5. SIDEBAR: FILE UPLOAD & LOGIC
+# 5. SIDEBAR: SETTINGS & DRIVERS
 # ==========================================
 with st.sidebar:
     st.header("Settings")
     
-    # --- FILE UPLOADER (CSV OR EXCEL) ---
     uploaded_file = st.file_uploader("Upload Exit Multiples (CSV/Excel)", type=["csv", "xlsx"])
     industry_map = {}
-    
-    if uploaded_file is not None:
+    if uploaded_file:
         industry_map = parse_industry_file(uploaded_file)
-        if industry_map:
-            st.success(f"Loaded {len(industry_map)} Industry Multiples!")
-        else:
-            st.warning("Could not parse file. Ensure columns 'Industry' and 'Multiple' exist.")
+        if industry_map: st.success(f"Loaded {len(industry_map)} Industry Multiples")
+        else: st.warning("File format incorrect. Need 'Industry' & 'Multiple' cols.")
     
     wacc = st.number_input("WACC %", value=9.0, step=0.1, format="%.1f", key=f"wacc_{ticker}") / 100
     
@@ -236,29 +228,27 @@ with st.sidebar:
     st.subheader("Drivers")
     st.caption(f"Detected Industry: {industry_name}")
     
-    # --- SMART DEFAULTS LOGIC ---
+    # --- SMART DEFAULT LOGIC ---
     current_margin = (e_in / r_in) if r_in > 0 else 0.0
     
-    # 1. Try Uploaded File Match
+    # 1. Check File Upload
     found_mult = None
     if industry_map and industry_name != "Unknown":
-        for ind_key, mult_val in industry_map.items():
-            # Fuzzy match: check if one string contains the other
-            if str(ind_key).lower() in industry_name.lower() or industry_name.lower() in str(ind_key).lower():
-                try:
-                    found_mult = float(mult_val)
-                    break
+        for k, v in industry_map.items():
+            if str(k).lower() in industry_name.lower() or industry_name.lower() in str(k).lower():
+                try: found_mult = float(v); break
                 except: continue
     
     if found_mult:
         def_mult = found_mult
         def_growth = 15.0 if def_mult > 20 else 5.0
     else:
-        # 2. Fallback to Margin Logic
+        # 2. Fallback to Margin-Based Guess
         if current_margin > 0.30: def_growth, def_mult = 15.0, 25.0
         elif current_margin < 0.10: def_growth, def_mult = 3.0, 8.0
         else: def_growth, def_mult = 5.0, 12.0
     
+    # Keys include {ticker} to force reset on symbol change
     g_rev = st.number_input("Revenue Growth %", value=def_growth, step=0.5, format="%.1f", key=f"g_{ticker}") / 100
     m_def = (current_margin * 100)
     margin_tgt = st.number_input("EBIT Margin %", value=float(f"{m_def:.1f}"), step=0.5, format="%.1f", key=f"m_{ticker}") / 100
@@ -266,7 +256,9 @@ with st.sidebar:
     ltg = st.number_input("Terminal Growth %", value=2.5, step=0.1, format="%.1f", key=f"l_{ticker}") / 100
     exit_mult = st.number_input("Exit Multiple (x)", value=def_mult, step=0.5, format="%.1f", key=f"e_{ticker}")
 
-# Calculations
+# ==========================================
+# 6. CALCULATION ENGINE
+# ==========================================
 years = range(1, 6)
 data = []
 safe_ltg = ltg if ltg < wacc else (wacc - 0.005)
@@ -295,7 +287,7 @@ else:
 df = pd.DataFrame(data).set_index('Year')
 sum_pv = df.loc[1:5, 'PV'].sum()
 
-# Valuation
+# Valuation Logic
 p_g, p_e, avg_int, mos_pct, ev_g, ev_e = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
 if r_in > 0:
     fcf5 = df.loc[5,'FCFF']
@@ -315,7 +307,7 @@ if r_in > 0:
     if cur_price > 0: mos_pct = (avg_int - cur_price) / cur_price
 
 # ==========================================
-# 6. VISUALIZATION
+# 7. VISUALIZATION
 # ==========================================
 st.divider()
 
