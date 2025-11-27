@@ -1,6 +1,8 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
+import requests
+import re
 
 # ==========================================
 # 1. CONFIGURATION & STYLING
@@ -118,7 +120,7 @@ def get_yahoo_data(ticker):
 # 3. UI: INPUTS
 # ==========================================
 c_tick, c_space = st.columns([1, 4])
-ticker = c_tick.text_input("Ticker", "NVDA").upper()
+ticker = c_tick.text_input("Ticker", "AMD").upper()
 
 # Initialize Session State
 if 'y0' not in st.session_state:
@@ -178,13 +180,13 @@ with st.sidebar:
     st.header("Assumptions")
     
     # WACC INPUT
-    wacc = st.number_input("WACC %", value=9.0, step=0.1, format="%.1f") / 100
+    # Use ticker key to reset default if needed, though usually WACC isn't auto-derived
+    wacc = st.number_input("WACC %", value=9.0, step=0.1, format="%.1f", key=f"wacc_{ticker}") / 100
     
     st.divider()
     st.subheader("Drivers")
     
     # --- SMART DEFAULTS LOGIC ---
-    # Calculate current margin to guess the "Company Type"
     current_margin = (e_in / r_in) if r_in > 0 else 0.0
     
     # Default Logic: High Margin = High Growth/Multiple assumption
@@ -194,23 +196,18 @@ with st.sidebar:
         def_growth, def_mult = 3.0, 8.0
     else:                       # Average
         def_growth, def_mult = 5.0, 12.0
-    # ----------------------------
-
-    # REVENUE GROWTH INPUT
-    g_rev = st.number_input("Revenue Growth %", value=def_growth, step=0.5, format="%.1f") / 100
     
-    # MARGIN INPUT (Dynamic Default)
+    # IMPORTANT: Keys include {ticker} to force reset when ticker changes
+    
+    g_rev = st.number_input("Revenue Growth %", value=def_growth, step=0.5, format="%.1f", key=f"g_{ticker}") / 100
+    
+    # Dynamic Margin Default
     m_def = (current_margin * 100)
-    margin_tgt = st.number_input("EBIT Margin %", value=float(f"{m_def:.1f}"), step=0.5, format="%.1f") / 100
+    margin_tgt = st.number_input("EBIT Margin %", value=float(f"{m_def:.1f}"), step=0.5, format="%.1f", key=f"m_{ticker}") / 100
     
-    # TAX RATE INPUT
-    tax_rate = st.number_input("Tax Rate %", value=21.0, step=1.0, format="%.1f") / 100
-    
-    # TERMINAL GROWTH INPUT
-    ltg = st.number_input("Terminal Growth %", value=2.5, step=0.1, format="%.1f") / 100
-    
-    # EXIT MULTIPLE INPUT
-    exit_mult = st.number_input("Exit Multiple (x)", value=def_mult, step=0.5, format="%.1f")
+    tax_rate = st.number_input("Tax Rate %", value=21.0, step=1.0, format="%.1f", key=f"t_{ticker}") / 100
+    ltg = st.number_input("Terminal Growth %", value=2.5, step=0.1, format="%.1f", key=f"l_{ticker}") / 100
+    exit_mult = st.number_input("Exit Multiple (x)", value=def_mult, step=0.5, format="%.1f", key=f"e_{ticker}")
 
 # Calculations
 years = range(1, 6)
