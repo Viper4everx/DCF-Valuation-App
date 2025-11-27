@@ -33,7 +33,7 @@ body { font-family: 'Inter', sans-serif; background: linear-gradient(135deg, #1e
 .val-sub { font-size: 12px; opacity: 0.6; margin-bottom: 20px; }
 .val-ev { font-size: 14px; opacity: 0.8; display: flex; justify-content: space-between; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 12px; }
 
-/* STATIC TABLE STYLING (Removes sorting/adjusting) */
+/* STATIC TABLE STYLING */
 .custom-table { width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 14px; }
 .custom-table th { text-align: center; padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.2); color: rgba(255,255,255,0.8); font-weight: 600; }
 .custom-table td { text-align: right; padding: 10px; border-bottom: 1px solid rgba(255,255,255,0.05); font-family: 'Inter', monospace; }
@@ -42,6 +42,7 @@ body { font-family: 'Inter', sans-serif; background: linear-gradient(135deg, #1e
 
 /* Overrides */
 div[data-testid="stExpander"] { background-color: rgba(255,255,255,0.02); border-radius: 12px; }
+th { text-align: center !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -106,7 +107,6 @@ if 'y0' not in st.session_state:
 # Auto-Fetch Logic
 if ticker:
     with st.spinner(f"Fetching data for {ticker}..."):
-        # We check if we already fetched for this specific ticker to avoid resetting user edits on every rerun
         if 'last_ticker' not in st.session_state or st.session_state.last_ticker != ticker:
             d, cur_price, shares_def = get_yahoo_data(ticker)
             if d:
@@ -118,7 +118,6 @@ if ticker:
                 st.error("Ticker not found on Yahoo Finance.")
                 cur_price, shares_def = 0.0, 1.0
         else:
-            # Use stored values
             cur_price = st.session_state.last_price
             shares_def = st.session_state.last_shares
 
@@ -138,22 +137,32 @@ with st.expander("Expand to edit Year 0 Data", expanded=True):
         st.form_submit_button("Update Model")
 
 # ==========================================
-# 4. DRIVERS & LOGIC
+# 4. DRIVERS & LOGIC (TEXT INPUTS)
 # ==========================================
 with st.sidebar:
     st.header("Assumptions")
-    wacc = st.number_input("WACC %", 3.0, 15.0, 9.0, 0.1)/100
+    
+    # WACC INPUT
+    wacc = st.number_input("WACC %", value=9.0, step=0.1, format="%.1f") / 100
+    
     st.divider()
     st.subheader("Drivers")
-    g_rev = st.slider("Revenue Growth %", 0, 30, 5, 1)/100
     
-    # Dynamic Margin Default
+    # REVENUE GROWTH INPUT
+    g_rev = st.number_input("Revenue Growth %", value=5.0, step=0.5, format="%.1f") / 100
+    
+    # MARGIN INPUT (Dynamic Default)
     m_def = (e_in/r_in*100) if r_in > 0 else 20.0
-    margin_tgt = st.slider("EBIT Margin %", 5, 60, int(m_def), 1)/100
+    margin_tgt = st.number_input("EBIT Margin %", value=float(f"{m_def:.1f}"), step=0.5, format="%.1f") / 100
     
-    tax_rate = st.slider("Tax Rate %", 0, 40, 21, 1)/100
-    ltg = st.slider("Terminal Growth %", 1, 5, 2, 1)/100
-    exit_mult = st.slider("Exit Multiple", 5, 30, 12, 1)
+    # TAX RATE INPUT
+    tax_rate = st.number_input("Tax Rate %", value=21.0, step=1.0, format="%.1f") / 100
+    
+    # TERMINAL GROWTH INPUT
+    ltg = st.number_input("Terminal Growth %", value=2.0, step=0.1, format="%.1f") / 100
+    
+    # EXIT MULTIPLE INPUT
+    exit_mult = st.number_input("Exit Multiple (x)", value=12.0, step=0.5, format="%.1f")
 
 # Calculations
 years = range(1, 6)
@@ -166,7 +175,7 @@ if r_in > 0:
     fcff0 = nopat0 + d_in - c_in
     data.append({'Year': 0, 'Revenue': r_in, 'EBIT': e_in, 'NOPAT': nopat0, 'D&A': d_in, 'Capex': c_in, 'FCFF': fcff0, 'PV': 0.0})
 
-    # Years 1-5
+    # Projection
     cap_r, dep_r, nwc_r = c_in/r_in, d_in/r_in, 0.02
     prev_rev = r_in
 
@@ -243,15 +252,14 @@ def make_bridge(pv_fcf, pv_tv, ev, debt, cash, eq):
         "Value": [pv_fcf, pv_tv, ev, debt-cash, eq]
     }).set_index("Component")
 
-# Bridges still use dataframe for cleanliness, but disabled for sorting
 bridge_config = {"Value": st.column_config.NumberColumn(format="$%.2fB")}
 
 with c_g:
     st.markdown(f"""<div class="val-card border-purple"><div class="val-title">Perpetuity Growth 🌊</div><div class="val-sub">Based on {safe_ltg:.1%} long-term growth</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-purple">${p_g:.2f}</div><div class="val-ev"><span>Enterprise Value</span><strong>${ev_g:.2f}B</strong></div></div>""", unsafe_allow_html=True)
     st.markdown("##### Bridge (Gordon)")
-    st.dataframe(make_bridge(sum_pv, pv_tv_g, ev_g, debt_in, cash_in, ev_g-(debt_in-cash_in)), use_container_width=True, column_config=bridge_config)
+    st.dataframe(make_bridge(sum_pv, pv_tv_g, ev_g, debt_in, cash_in, ev_g-(debt_in-cash_in)).style.format("${:,.2f}B"), use_container_width=True)
 
 with c_e:
     st.markdown(f"""<div class="val-card border-green"><div class="val-title">Exit Multiple 💼</div><div class="val-sub">Based on {exit_mult}x EBITDA multiple</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-green">${p_e:.2f}</div><div class="val-ev"><span>Enterprise Value</span><strong>${ev_e:.2f}B</strong></div></div>""", unsafe_allow_html=True)
     st.markdown("##### Bridge (Multiple)")
-    st.dataframe(make_bridge(sum_pv, pv_tv_e, ev_e, debt_in, cash_in, ev_e-(debt_in-cash_in)), use_container_width=True, column_config=bridge_config)
+    st.dataframe(make_bridge(sum_pv, pv_tv_e, ev_e, debt_in, cash_in, ev_e-(debt_in-cash_in)).style.format("${:,.2f}B"), use_container_width=True)
