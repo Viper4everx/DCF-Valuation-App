@@ -1,12 +1,13 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
+import requests
 import re
 
 # ==========================================
 # 1. CONFIGURATION & STYLING
 # ==========================================
-st.set_page_config(page_title="Valuation Dashboard", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="DCF Valuation Tool", layout="wide", initial_sidebar_state="expanded")
 
 st.markdown("""
 <style>
@@ -124,24 +125,32 @@ def get_yahoo_data(ticker):
         return None, 0.0, 1.0, str(e), "USD", "Unknown"
 
 # ==========================================
-# 3. HELPER: CSV PARSER
+# 3. HELPER: UNIVERSAL FILE PARSER
 # ==========================================
 @st.cache_data
-def parse_industry_csv(file):
+def parse_industry_file(file):
+    """Reads CSV or Excel and finds the Industry/Multiple columns."""
     try:
-        df = pd.read_csv(file)
-        # Normalize column names to find 'Industry' and 'Multiple'
-        df.columns = [c.lower().strip() for c in df.columns]
+        # Determine file type
+        if file.name.endswith('.csv'):
+            df = pd.read_csv(file)
+        else:
+            # Assumes Excel if not CSV
+            df = pd.read_excel(file)
+            
+        # Normalize column names
+        df.columns = [str(c).lower().strip() for c in df.columns]
         
-        # Find the right columns
-        ind_col = next((c for c in df.columns if 'industry' in c or 'sector' in c), None)
-        mult_col = next((c for c in df.columns if 'multiple' in c or 'exit' in c or 'ebitda' in c), None)
+        # Smart Column Finder
+        ind_col = next((c for c in df.columns if any(x in c for x in ['industry', 'sector', 'segment'])), None)
+        mult_col = next((c for c in df.columns if any(x in c for x in ['multiple', 'exit', 'ebitda', 'x'])), None)
         
         if ind_col and mult_col:
-            # Convert to dictionary {Industry: Multiple}
+            # Return dict: {Industry Name : Multiple Value}
             return dict(zip(df[ind_col], df[mult_col]))
         return None
-    except:
+    except Exception as e:
+        st.error(f"Error parsing file: {e}")
         return None
 
 # ==========================================
@@ -210,16 +219,16 @@ with st.expander("Expand to edit Year 0 Data", expanded=True):
 with st.sidebar:
     st.header("Settings")
     
-    # --- FILE UPLOADER FOR MULTIPLES ---
-    uploaded_file = st.file_uploader("Upload Exit Multiples (CSV)", type=["csv"])
+    # --- FILE UPLOADER (CSV OR EXCEL) ---
+    uploaded_file = st.file_uploader("Upload Exit Multiples (CSV/Excel)", type=["csv", "xlsx"])
     industry_map = {}
     
     if uploaded_file is not None:
-        industry_map = parse_industry_csv(uploaded_file)
+        industry_map = parse_industry_file(uploaded_file)
         if industry_map:
             st.success(f"Loaded {len(industry_map)} Industry Multiples!")
         else:
-            st.warning("Could not parse CSV. Ensure columns 'Industry' and 'Multiple' exist.")
+            st.warning("Could not parse file. Ensure columns 'Industry' and 'Multiple' exist.")
     
     wacc = st.number_input("WACC %", value=9.0, step=0.1, format="%.1f", key=f"wacc_{ticker}") / 100
     
@@ -230,18 +239,19 @@ with st.sidebar:
     # --- SMART DEFAULTS LOGIC ---
     current_margin = (e_in / r_in) if r_in > 0 else 0.0
     
-    # 1. Try Uploaded CSV Match First
-    # Use loose matching (e.g. "Semiconductors" in "Semiconductors & Equipment")
+    # 1. Try Uploaded File Match
     found_mult = None
     if industry_map and industry_name != "Unknown":
         for ind_key, mult_val in industry_map.items():
+            # Fuzzy match: check if one string contains the other
             if str(ind_key).lower() in industry_name.lower() or industry_name.lower() in str(ind_key).lower():
-                found_mult = float(mult_val)
-                break
+                try:
+                    found_mult = float(mult_val)
+                    break
+                except: continue
     
     if found_mult:
         def_mult = found_mult
-        # Heuristic: High multiple industries usually grow faster
         def_growth = 15.0 if def_mult > 20 else 5.0
     else:
         # 2. Fallback to Margin Logic
