@@ -38,7 +38,7 @@ div[data-testid="stExpander"] { background-color: rgba(255,255,255,0.02); border
 st.markdown('<h1 style="text-align:center; margin-bottom: 30px;">DCF Valuation Tool</h1>', unsafe_allow_html=True)
 
 # ==========================================
-# 2. DATA ENGINE
+# 2. DATA ENGINE (OPTIMIZED)
 # ==========================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_yahoo_data(ticker):
@@ -226,12 +226,11 @@ else:
 df_base = pd.DataFrame(base_data).set_index('Year')
 
 # ==========================================
-# 6. INTERACTIVE TABLE (TIGHT LAYOUT)
+# 6. INTERACTIVE TABLE (RIGHT ALIGNED TOOLS)
 # ==========================================
 st.divider()
 
 # Layout: Title (60%) | Spacer (25%) | Toggle (8%) | Reset (7%)
-# vertical_alignment="bottom" ensures they sit on the same baseline
 c_title, c_space, c_toggle, c_reset = st.columns([6, 2.5, 0.8, 0.7], vertical_alignment="bottom")
 
 with c_title:
@@ -325,8 +324,8 @@ if cur_price > 0 and r_in > 0:
     s_txt = "UNDERVALUED" if mos_pct >= 0 else "OVERVALUED"
     st.markdown(f"""
     <div class="glass-card" style="display:flex; justify-content: space-around; align-items: center;">
-        <div style="text-align:center;"><div class="val-label">CURRENT PRICE</div><div class="val-price">{curr_symbol}{cur_price:.2f}</div></div>
-        <div style="text-align:center;"><div class="val-label">INTRINSIC VALUE</div><div class="val-price text-blue">{curr_symbol}{avg_int:.2f}</div></div>
+        <div style="text-align:center;"><div class="val-label">CURRENT PRICE</div><div class="val-price">{curr_symbol}{cur_price:,.2f}</div></div>
+        <div style="text-align:center;"><div class="val-label">INTRINSIC VALUE</div><div class="val-price text-blue">{curr_symbol}{avg_int:,.2f}</div></div>
         <div style="text-align:center;"><div class="val-label">UPSIDE</div><div class="val-price {s_col}">{mos_pct:+.1%}</div><div class="{s_col}">{s_txt}</div></div>
     </div>
     """, unsafe_allow_html=True)
@@ -340,14 +339,15 @@ def make_bridge(pv_fcf, pv_tv, ev, debt, cash, eq):
         "Value": [pv_fcf, pv_tv, ev, debt-cash, eq]
     }).set_index("Component")
 
-bridge_config = {"Value": st.column_config.NumberColumn(format=f"{curr_symbol}%.2fB")}
+# Apply comma formatting to the bridges via Pandas Styling
+bridge_format = f"{curr_symbol}{{:,.2f}}B"
 
 with c_g:
-    st.markdown(f"""<div class="val-card border-purple"><div class="val-title">Perpetuity Growth 🌊</div><div class="val-sub">Based on {safe_ltg:.1%} long-term growth</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-purple">{curr_symbol}{p_g:.2f}</div><div class="val-ev"><span>Enterprise Value</span><strong>{curr_symbol}{ev_g:.2f}B</strong></div></div>""", unsafe_allow_html=True)
+    st.markdown(f"""<div class="val-card border-purple"><div class="val-title">Perpetuity Growth 🌊</div><div class="val-sub">Based on {safe_ltg:.1%} long-term growth</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-purple">{curr_symbol}{p_g:,.2f}</div><div class="val-ev"><span>Enterprise Value</span><strong>{curr_symbol}{ev_g:,.2f}B</strong></div></div>""", unsafe_allow_html=True)
     st.markdown("##### Bridge (Gordon)")
-    st.dataframe(make_bridge(sum_pv_final, pv_tv_g, ev_g, debt_in, cash_in, ev_g-(debt_in-cash_in)), use_container_width=True, column_config=bridge_config)
+    st.dataframe(make_bridge(sum_pv_final, pv_tv_g, ev_g, debt_in, cash_in, ev_g-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
 
 with c_e:
-    st.markdown(f"""<div class="val-card border-green"><div class="val-title">Exit Multiple 💼</div><div class="val-sub">Based on {exit_mult}x EBITDA multiple</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-green">{curr_symbol}{p_e:.2f}</div><div class="val-ev"><span>Enterprise Value</span><strong>{curr_symbol}{ev_e:.2f}B</strong></div></div>""", unsafe_allow_html=True)
+    st.markdown(f"""<div class="val-card border-green"><div class="val-title">Exit Multiple 💼</div><div class="val-sub">Based on {exit_mult}x EBITDA multiple</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-green">{curr_symbol}{p_e:,.2f}</div><div class="val-ev"><span>Enterprise Value</span><strong>{curr_symbol}{ev_e:,.2f}B</strong></div></div>""", unsafe_allow_html=True)
     st.markdown("##### Bridge (Multiple)")
-    st.dataframe(make_bridge(sum_pv_final, pv_tv_e, ev_e, debt_in, cash_in, ev_e-(debt_in-cash_in)), use_container_width=True, column_config=bridge_config)
+    st.dataframe(make_bridge(sum_pv_final, pv_tv_e, ev_e, debt_in, cash_in, ev_e-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
