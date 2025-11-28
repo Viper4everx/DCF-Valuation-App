@@ -230,19 +230,20 @@ df_base = pd.DataFrame(base_data).set_index('Year')
 # ==========================================
 st.divider()
 
-# Layout: Title on Left | Spacer | Toggle | Reset
-c_title, c_space, c_lock, c_reset = st.columns([5, 3, 2, 2])
+# Layout: Title (Left) | Spacer | Lock & Reset (Far Right)
+# [6, 1, 1] keeps buttons tight to the right side
+c_title, c_lock, c_reset = st.columns([6, 1, 1])
 
 with c_title:
     st.subheader(f"Projected Free Cash Flow (Millions {curr_symbol})")
 
 with c_lock:
     # LOCK TOGGLE
-    is_unlocked = st.toggle("🔓 Unlock", value=False, help="Enable editing of projection cells")
+    is_unlocked = st.toggle("Unlock", value=False)
 
 with c_reset:
-    # RESET BUTTON
-    if st.button("↺ Reset", use_container_width=True):
+    # RESET BUTTON (Small)
+    if st.button("↺ Reset"):
         st.session_state.reset_key += 1
         st.rerun()
 
