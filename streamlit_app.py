@@ -38,7 +38,7 @@ div[data-testid="stExpander"] { background-color: rgba(255,255,255,0.02); border
 st.markdown('<h1 style="text-align:center; margin-bottom: 30px;">DCF Valuation Tool</h1>', unsafe_allow_html=True)
 
 # ==========================================
-# 2. DATA ENGINE (OPTIMIZED)
+# 2. DATA ENGINE
 # ==========================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_yahoo_data(ticker):
@@ -117,7 +117,6 @@ ticker = c_tick.text_input("Ticker", "NVDA").upper()
 if 'y0' not in st.session_state:
     st.session_state.y0 = {k:0.0 for k in ['Revenue','EBIT','Depreciation','Capex','Debt','Cash']}
 
-# Session State for Resetting Table
 if 'reset_key' not in st.session_state:
     st.session_state.reset_key = 0
 
@@ -183,7 +182,6 @@ with st.sidebar:
     
     current_margin = (e_in / r_in) if r_in > 0 else 0.0
     
-    # Smart Defaults
     if current_margin > 0.30: def_growth, def_mult = 15.0, 25.0
     elif current_margin < 0.10: def_growth, def_mult = 3.0, 8.0
     else: def_growth, def_mult = 5.0, 12.0
@@ -226,11 +224,10 @@ else:
 df_base = pd.DataFrame(base_data).set_index('Year')
 
 # ==========================================
-# 6. INTERACTIVE TABLE (RIGHT ALIGNED TOOLS)
+# 6. INTERACTIVE TABLE (FORMATTED)
 # ==========================================
 st.divider()
 
-# Layout: Title (60%) | Spacer (25%) | Toggle (8%) | Reset (7%)
 c_title, c_space, c_toggle, c_reset = st.columns([6, 2.5, 0.8, 0.7], vertical_alignment="bottom")
 
 with c_title:
@@ -244,40 +241,47 @@ with c_reset:
         st.session_state.reset_key += 1
         st.rerun()
 
-# Logic to disable columns
-display_cols = [f"Year {y}" for y in range(6)]
-disabled_cols = display_cols if not is_unlocked else ["Year 0"]
-
-# Prepare DataFrame for Editor
+# 1. Format numbers to strings with commas ("10,000.50") for visual display
+# We multiply by 1000 to get Millions
 df_display = (df_base * 1000).T
-df_display.columns = display_cols
+df_display.columns = [f"Year {y}" for y in range(6)]
 
-# EDITABLE DATAFRAME
+# Apply comma formatting to creating a string version
+df_formatted = df_display.applymap(lambda x: f"{x:,.2f}")
+
+# 2. Editor Configuration
+# We use TextColumn to respect the commas, but we need to clean them later
+disabled_cols = df_formatted.columns if not is_unlocked else ["Year 0"]
+
 edited_df = st.data_editor(
-    df_display,
+    df_formatted,
     use_container_width=True,
     disabled=disabled_cols,
-    key=f"editor_{st.session_state.reset_key}",
-    column_config={
-        col: st.column_config.NumberColumn(format="%.2f") for col in display_cols
-    }
+    key=f"editor_{st.session_state.reset_key}"
 )
 
 # ==========================================
-# 7. VALUATION LOGIC (FROM EDITED DATA)
+# 7. VALUATION LOGIC (CLEANING INPUTS)
 # ==========================================
 try:
+    # Helper to clean "$1,234.56" back to float 1234.56
+    def clean_num(val):
+        if isinstance(val, (int, float)): return val
+        return float(str(val).replace(',', '').replace('$', '').replace('€','').replace('£','').replace('¥',''))
+
     fcf_stream = []
     
     for y in years:
         col_name = f"Year {y}"
-        rev_edit = edited_df.loc['Revenue', col_name] / 1000
-        ebit_edit = edited_df.loc['EBIT', col_name] / 1000
-        da_edit = edited_df.loc['D&A', col_name] / 1000
-        capex_edit = edited_df.loc['Capex', col_name] / 1000
+        
+        # Clean and Scale back to Billions (/1000)
+        rev_edit = clean_num(edited_df.loc['Revenue', col_name]) / 1000
+        ebit_edit = clean_num(edited_df.loc['EBIT', col_name]) / 1000
+        da_edit = clean_num(edited_df.loc['D&A', col_name]) / 1000
+        capex_edit = clean_num(edited_df.loc['Capex', col_name]) / 1000
         
         prev_col = f"Year {y-1}"
-        rev_prev = edited_df.loc['Revenue', prev_col] / 1000
+        rev_prev = clean_num(edited_df.loc['Revenue', prev_col]) / 1000
         dnwc = (rev_edit - rev_prev) * 0.02
         
         nopat = ebit_edit * (1 - tax_rate)
@@ -339,7 +343,6 @@ def make_bridge(pv_fcf, pv_tv, ev, debt, cash, eq):
         "Value": [pv_fcf, pv_tv, ev, debt-cash, eq]
     }).set_index("Component")
 
-# Apply comma formatting to the bridges via Pandas Styling
 bridge_format = f"{curr_symbol}{{:,.2f}}B"
 
 with c_g:
