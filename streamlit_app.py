@@ -38,7 +38,7 @@ div[data-testid="stExpander"] { background-color: rgba(255,255,255,0.02); border
 st.markdown('<h1 style="text-align:center; margin-bottom: 30px;">DCF Valuation Tool</h1>', unsafe_allow_html=True)
 
 # ==========================================
-# 2. DATA ENGINE (BILLIONS STANDARD)
+# 2. DATA ENGINE (MILLIONS STANDARD)
 # ==========================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_yahoo_data(ticker):
@@ -56,7 +56,9 @@ def get_yahoo_data(ticker):
             try: shares = tk.fast_info.shares_outstanding
             except: pass
         if not shares: shares = 1e9
-        shares = shares / 1e9 # Shares in Billions
+        
+        # UNIFIED UNIT: MILLIONS (Divide by 1e6)
+        shares = shares / 1e6 
 
         industry = tk.info.get('industry', 'Unknown')
         
@@ -90,8 +92,8 @@ def get_yahoo_data(ticker):
             return 0.0
 
         data = {}
-        # UNIFIED UNIT: BILLIONS (Divide by 1e9)
-        factor = fx_rate / 1e9 
+        # UNIFIED UNIT: MILLIONS (Divide by 1e6)
+        factor = fx_rate / 1e6 
         
         data['Revenue'] = get_val(inc, ['Total Revenue', 'Total Net Sales', 'Total Interest Income']) * factor
         data['EBIT']    = get_val(inc, ['Operating Income', 'EBIT', 'Operating Profit']) * factor
@@ -156,18 +158,18 @@ if ticker:
         st.info(f"💱 {st.session_state.fx_msg}")
 
 # Year 0 Form
-st.markdown("### Year 0: Base Financials (Billions)")
+st.markdown("### Year 0: Base Financials (Millions)")
 with st.expander("Expand to edit Year 0 Data", expanded=True):
     with st.form("y0_form"):
         c1, c2, c3, c4 = st.columns(4)
-        r_in = c1.number_input("Revenue", value=st.session_state.y0['Revenue'], format="%.3f")
-        e_in = c2.number_input("EBIT", value=st.session_state.y0['EBIT'], format="%.3f")
-        d_in = c3.number_input("D&A", value=st.session_state.y0['Depreciation'], format="%.3f")
-        c_in = c4.number_input("Capex", value=st.session_state.y0['Capex'], format="%.3f")
+        r_in = c1.number_input("Revenue", value=st.session_state.y0['Revenue'], format="%.2f")
+        e_in = c2.number_input("EBIT", value=st.session_state.y0['EBIT'], format="%.2f")
+        d_in = c3.number_input("D&A", value=st.session_state.y0['Depreciation'], format="%.2f")
+        c_in = c4.number_input("Capex", value=st.session_state.y0['Capex'], format="%.2f")
         c5, c6, c7 = st.columns(3)
-        debt_in = c5.number_input("Total Debt", value=st.session_state.y0['Debt'], format="%.3f")
-        cash_in = c6.number_input("Total Cash", value=st.session_state.y0['Cash'], format="%.3f")
-        shares_in = c7.number_input("Shares (Billions)", value=shares_def, format="%.3f")
+        debt_in = c5.number_input("Total Debt", value=st.session_state.y0['Debt'], format="%.2f")
+        cash_in = c6.number_input("Total Cash", value=st.session_state.y0['Cash'], format="%.2f")
+        shares_in = c7.number_input("Shares (Millions)", value=shares_def, format="%.2f")
         st.form_submit_button("Update Model")
 
 # ==========================================
@@ -195,7 +197,7 @@ with st.sidebar:
     exit_mult = st.number_input("Exit Multiple (x)", value=def_mult, step=0.5, format="%.1f", key=f"e_{ticker}")
 
 # ==========================================
-# 5. BASE CALCULATION ENGINE (BILLIONS)
+# 5. BASE CALCULATION ENGINE
 # ==========================================
 years = range(1, 6)
 base_data = []
@@ -229,10 +231,10 @@ df_base = pd.DataFrame(base_data).set_index('Year')
 # ==========================================
 st.divider()
 
-c_title, c_space, c_tools = st.columns([8, 2], vertical_alignment="bottom")
+c_title, c_space, c_tools = st.columns([5, 3, 2], vertical_alignment="bottom")
 
 with c_title:
-    st.subheader(f"Projected Free Cash Flow (Billions {curr_symbol})")
+    st.subheader(f"Projected Free Cash Flow (Millions {curr_symbol})")
 
 with c_tools:
     t_col, b_col = st.columns([1, 1], gap="small")
@@ -246,7 +248,7 @@ with c_tools:
 display_cols = [f"Year {y}" for y in range(6)]
 disabled_cols = display_cols if not is_unlocked else ["Year 0"]
 
-# DataFrame stays in Billions (matching Year 0)
+# DataFrame is already in Millions
 df_display = df_base.T
 df_display.columns = display_cols
 df_formatted = df_display.applymap(lambda x: f"{x:,.2f}")
@@ -255,10 +257,7 @@ edited_df = st.data_editor(
     df_formatted,
     use_container_width=True,
     disabled=disabled_cols,
-    key=f"editor_{st.session_state.reset_key}",
-    column_config={
-        col: st.column_config.NumberColumn(format=f"{curr_symbol} %.2f") for col in display_cols
-    }
+    key=f"editor_{st.session_state.reset_key}"
 )
 
 # ==========================================
@@ -273,7 +272,7 @@ try:
     
     for y in years:
         col_name = f"Year {y}"
-        # Values are already in Billions
+        # Inputs are already in Millions
         rev_edit = clean_num(edited_df.loc['Revenue', col_name])
         ebit_edit = clean_num(edited_df.loc['EBIT', col_name])
         da_edit = clean_num(edited_df.loc['D&A', col_name])
@@ -342,15 +341,15 @@ def make_bridge(pv_fcf, pv_tv, ev, debt, cash, eq):
         "Value": [pv_fcf, pv_tv, ev, debt-cash, eq]
     }).set_index("Component")
 
-# Bridges in Billions
-bridge_format = f"{curr_symbol}{{:,.2f}}B"
+# Bridges formatted in Millions
+bridge_format = f"{curr_symbol}{{:,.2f}}M"
 
 with c_g:
-    st.markdown(f"""<div class="val-card border-purple"><div class="val-title">Perpetuity Growth 🌊</div><div class="val-sub">Based on {safe_ltg:.1%} long-term growth</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-purple">{curr_symbol}{p_g:,.2f}</div><div class="val-ev"><span>Enterprise Value</span><strong>{curr_symbol}{ev_g:,.2f}B</strong></div></div>""", unsafe_allow_html=True)
-    st.markdown("##### Bridge (Gordon)")
+    st.markdown(f"""<div class="val-card border-purple"><div class="val-title">Perpetuity Growth 🌊</div><div class="val-sub">Based on {safe_ltg:.1%} long-term growth</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-purple">{curr_symbol}{p_g:,.2f}</div><div class="val-ev"><span>Enterprise Value</span><strong>{curr_symbol}{ev_g:,.2f}M</strong></div></div>""", unsafe_allow_html=True)
+    st.markdown("##### Bridge (Gordon) - Millions")
     st.dataframe(make_bridge(sum_pv_final, pv_tv_g, ev_g, debt_in, cash_in, ev_g-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
 
 with c_e:
-    st.markdown(f"""<div class="val-card border-green"><div class="val-title">Exit Multiple 💼</div><div class="val-sub">Based on {exit_mult}x EBITDA multiple</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-green">{curr_symbol}{p_e:,.2f}</div><div class="val-ev"><span>Enterprise Value</span><strong>{curr_symbol}{ev_e:,.2f}B</strong></div></div>""", unsafe_allow_html=True)
-    st.markdown("##### Bridge (Multiple)")
+    st.markdown(f"""<div class="val-card border-green"><div class="val-title">Exit Multiple 💼</div><div class="val-sub">Based on {exit_mult}x EBITDA multiple</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-green">{curr_symbol}{p_e:,.2f}</div><div class="val-ev"><span>Enterprise Value</span><strong>{curr_symbol}{ev_e:,.2f}M</strong></div></div>""", unsafe_allow_html=True)
+    st.markdown("##### Bridge (Multiple) - Millions")
     st.dataframe(make_bridge(sum_pv_final, pv_tv_e, ev_e, debt_in, cash_in, ev_e-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
