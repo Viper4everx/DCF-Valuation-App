@@ -155,7 +155,7 @@ def get_yahoo_data(ticker):
 # ==========================================
 # 4. UI: INPUTS
 # ==========================================
-c_tick, c_space, c_pdf = st.columns([2, 5, 1], vertical_alignment="bottom")
+c_tick, c_space, c_pdf = st.columns([2, 5, 1.5], vertical_alignment="bottom")
 
 with c_tick:
     ticker = st.text_input("Ticker", "NVDA").upper()
