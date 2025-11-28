@@ -452,7 +452,7 @@ if cur_price > 0 and r_in > 0:
     
     # We populate the empty container we made at the top
     pdf_spot.download_button(
-        label="📄 Download PDF Report",
+        label="📄 Download PDF",
         data=pdf_bytes,
         file_name=f"{ticker}_Valuation_Report.pdf",
         mime="application/pdf",
