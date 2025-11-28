@@ -227,7 +227,7 @@ else:
 df_base = pd.DataFrame(base_data).set_index('Year')
 
 # ==========================================
-# 6. INTERACTIVE TABLE
+# 6. INTERACTIVE TABLE (WITH COMMAS)
 # ==========================================
 st.divider()
 
@@ -248,7 +248,7 @@ with c_tools:
 display_cols = [f"Year {y}" for y in range(6)]
 disabled_cols = display_cols if not is_unlocked else ["Year 0"]
 
-# DataFrame is already in Millions
+# Format the dataframe as STRINGS with commas for display
 df_display = df_base.T
 df_display.columns = display_cols
 df_formatted = df_display.applymap(lambda x: f"{x:,.2f}")
@@ -264,8 +264,10 @@ edited_df = st.data_editor(
 # 7. VALUATION LOGIC
 # ==========================================
 try:
+    # Helper to clean strings back to numbers
     def clean_num(val):
         if isinstance(val, (int, float)): return val
+        # Remove commas, currency symbols, and spaces
         return float(str(val).replace(',', '').replace(curr_symbol, '').strip())
 
     fcf_stream = []
@@ -346,10 +348,10 @@ bridge_format = f"{curr_symbol}{{:,.2f}}M"
 
 with c_g:
     st.markdown(f"""<div class="val-card border-purple"><div class="val-title">Perpetuity Growth 🌊</div><div class="val-sub">Based on {safe_ltg:.1%} long-term growth</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-purple">{curr_symbol}{p_g:,.2f}</div><div class="val-ev"><span>Enterprise Value</span><strong>{curr_symbol}{ev_g:,.2f}M</strong></div></div>""", unsafe_allow_html=True)
-    st.markdown("##### Bridge (Gordon) - Millions")
+    st.markdown("##### Bridge (Gordon)")
     st.dataframe(make_bridge(sum_pv_final, pv_tv_g, ev_g, debt_in, cash_in, ev_g-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
 
 with c_e:
     st.markdown(f"""<div class="val-card border-green"><div class="val-title">Exit Multiple 💼</div><div class="val-sub">Based on {exit_mult}x EBITDA multiple</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-green">{curr_symbol}{p_e:,.2f}</div><div class="val-ev"><span>Enterprise Value</span><strong>{curr_symbol}{ev_e:,.2f}M</strong></div></div>""", unsafe_allow_html=True)
-    st.markdown("##### Bridge (Multiple) - Millions")
+    st.markdown("##### Bridge (Multiple)")
     st.dataframe(make_bridge(sum_pv_final, pv_tv_e, ev_e, debt_in, cash_in, ev_e-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
