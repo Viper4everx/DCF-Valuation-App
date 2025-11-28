@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
+import re
 
 # ==========================================
 # 1. CONFIGURATION & STYLING
@@ -110,7 +111,7 @@ def get_yahoo_data(ticker):
 # ==========================================
 # 3. UI: INPUTS
 # ==========================================
-c_tick, _ = st.columns([1, 4])
+c_tick, c_space = st.columns([1, 4])
 ticker = c_tick.text_input("Ticker", "NVDA").upper()
 
 if 'y0' not in st.session_state:
@@ -227,7 +228,7 @@ df_base = pd.DataFrame(base_data).set_index('Year')
 # ==========================================
 st.divider()
 
-c_title, _, c_toggle, c_reset = st.columns([6, 2.5, 0.8, 0.7], vertical_alignment="bottom")
+c_title, c_space, c_toggle, c_reset = st.columns([6, 2.5, 0.8, 0.7], vertical_alignment="bottom")
 
 with c_title:
     st.subheader(f"Projected Free Cash Flow (Millions {curr_symbol})")
@@ -249,19 +250,13 @@ df_display.columns = [f"Year {y}" for y in range(6)]
 df_formatted = df_display.applymap(lambda x: f"{x:,.2f}")
 
 # 2. Editor Configuration
+# We use TextColumn to respect the commas, but we need to clean them later
 disabled_cols = df_formatted.columns if not is_unlocked else ["Year 0"]
-
-# Disable sorting for all columns to prevent row shuffling
-col_config = {
-    col: st.column_config.Column(sortable=False) 
-    for col in df_formatted.columns
-}
 
 edited_df = st.data_editor(
     df_formatted,
     use_container_width=True,
     disabled=disabled_cols,
-    column_config=col_config, # This disables the sort menu options
     key=f"editor_{st.session_state.reset_key}"
 )
 
