@@ -438,7 +438,6 @@ if cur_price > 0 and r_in > 0:
     """, unsafe_allow_html=True)
 
     # >>> GENERATE PDF & ACTIVATE BUTTON <<<
-    # This runs after variables (avg_int, mos_pct) are calculated.
     pdf_bytes = create_pdf(
         ticker, 
         pd.Timestamp.now().strftime('%Y-%m-%d'),
@@ -494,4 +493,19 @@ sens_data = {}
 for t_g in ltg_range:
     col_data = []
     for w_r in wacc_range:
-        val = calculate_dcf_value(r_in, e_in, d_in, c_in, g_rev, margin_tgt, tax_rate, w_r, t_g, exit_mult, debt_in, cash_in, shares_
+        val = calculate_dcf_value(r_in, e_in, d_in, c_in, g_rev, margin_tgt, tax_rate, w_r, t_g, exit_mult, debt_in, cash_in, shares_in)
+        col_data.append(val)
+    sens_data[f"{t_g:.2%}"] = col_data
+
+df_sens = pd.DataFrame(sens_data, index=[f"{w:.1%}" for w in wacc_range])
+df_sens.index.name = "WACC"
+df_sens.columns.name = "Terminal Growth"
+
+def style_sens(val):
+    color = '#2a2a3e' 
+    if val > cur_price * 1.1: color = '#105234' 
+    elif val < cur_price * 0.9: color = '#4a151b' 
+    return f'background-color: {color}; color: white; border: 1px solid #444;'
+
+st.dataframe(df_sens.style.format(f"{curr_symbol}{{:,.2f}}").applymap(style_sens), use_container_width=True)
+st.info("💡 **How to read:** Green cells indicate the stock is undervalued even with these assumptions. Red indicates overvaluation.")
