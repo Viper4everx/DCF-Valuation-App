@@ -35,7 +35,7 @@ div[data-testid="stExpander"] { background-color: rgba(255,255,255,0.02); border
 
 /* Print Handling */
 @media print {
-    .stSidebar, button, .stButton { display: none !important; }
+    .stSidebar, button, .stButton, .print-btn-container { display: none !important; }
     body { background: white; color: black; }
     .glass-card, .val-card { border: 1px solid #ccc; background: white; color: black; }
     .val-price { color: #000; }
@@ -43,21 +43,8 @@ div[data-testid="stExpander"] { background-color: rgba(255,255,255,0.02); border
 </style>
 """, unsafe_allow_html=True)
 
-# Print JS Script
-st.markdown("""
-<script>
-function printPage() {
-    window.print();
-}
-</script>
-""", unsafe_allow_html=True)
-
-c_header, c_print = st.columns([8, 1])
-with c_header:
-    st.markdown('<h1 style="text-align:center; margin-bottom: 30px;">DCF Valuation Tool</h1>', unsafe_allow_html=True)
-with c_print:
-    if st.button("🖨️ PDF"):
-        st.markdown(f'<script>window.print()</script>', unsafe_allow_html=True)
+# Main Title (PDF Button removed from here)
+st.markdown('<h1 style="text-align:center; margin-bottom: 30px;">DCF Valuation Tool</h1>', unsafe_allow_html=True)
 
 # ==========================================
 # 2. DATA ENGINE
@@ -124,8 +111,28 @@ def get_yahoo_data(ticker):
 # ==========================================
 # 3. UI: INPUTS
 # ==========================================
-c_tick, _ = st.columns([1, 4])
-ticker = c_tick.text_input("Ticker", "NVDA").upper()
+# CHANGED: Added PDF Button here at the end of the line
+c_tick, c_space, c_pdf = st.columns([2, 5, 1], vertical_alignment="bottom")
+
+with c_tick:
+    ticker = st.text_input("Ticker", "NVDA").upper()
+
+with c_pdf:
+    st.markdown("""
+    <div class="print-btn-container" style="text-align: right; margin-bottom: 5px;">
+        <button onclick="window.print()" style="
+            background-color: #262730; 
+            color: white; 
+            border: 1px solid rgba(250,250,250,0.2); 
+            padding: 0.5rem 1rem; 
+            border-radius: 0.5rem; 
+            cursor: pointer; 
+            font-weight: 600;
+            transition: background 0.2s;">
+            🖨️ PDF
+        </button>
+    </div>
+    """, unsafe_allow_html=True)
 
 if 'y0' not in st.session_state:
     st.session_state.y0 = {k:0.0 for k in ['Revenue','EBIT','Depreciation','Capex','Debt','Cash']}
@@ -308,11 +315,11 @@ else:
 df_base = pd.DataFrame(base_data).set_index('Year')
 
 # ==========================================
-# 6. INTERACTIVE TABLE (TIGHTER LAYOUT)
+# 6. INTERACTIVE TABLE
 # ==========================================
 st.divider()
 
-# Adjusted column ratios to pull Reset/Unlock closer together
+# RETAINING YOUR PREFERRED LAYOUT FOR RESET/UNLOCK
 c_title, c_space, c_toggle, c_reset = st.columns([7, 2.5, 0.7, 0.7], vertical_alignment="bottom")
 
 with c_title:
