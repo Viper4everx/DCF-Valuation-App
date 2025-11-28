@@ -224,56 +224,64 @@ else:
 df_base = pd.DataFrame(base_data).set_index('Year')
 
 # ==========================================
-# 6. INTERACTIVE TABLE
+# 6. INTERACTIVE TABLE (FORMATTED)
 # ==========================================
 st.divider()
 
-c_title, c_space, c_tools = st.columns([5, 3, 2], vertical_alignment="bottom")
+c_title, c_space, c_toggle, c_reset = st.columns([6, 2.5, 0.8, 0.7], vertical_alignment="bottom")
 
 with c_title:
     st.subheader(f"Projected Free Cash Flow (Millions {curr_symbol})")
 
-with c_tools:
-    t_col, b_col = st.columns([1, 1], gap="small")
-    with t_col:
-        is_unlocked = st.toggle("Unlock", value=False)
-    with b_col:
-        if st.button("↺ Reset", use_container_width=True):
-            st.session_state.reset_key += 1
-            st.rerun()
+with c_toggle:
+    is_unlocked = st.toggle("Unlock", value=False)
 
-display_cols = [f"Year {y}" for y in range(6)]
-disabled_cols = display_cols if not is_unlocked else ["Year 0"]
+with c_reset:
+    if st.button("↺ Reset", use_container_width=True):
+        st.session_state.reset_key += 1
+        st.rerun()
 
+# 1. Format numbers to strings with commas ("10,000.50") for visual display
+# We multiply by 1000 to get Millions
 df_display = (df_base * 1000).T
-df_display.columns = display_cols
+df_display.columns = [f"Year {y}" for y in range(6)]
+
+# Apply comma formatting to creating a string version
+df_formatted = df_display.applymap(lambda x: f"{x:,.2f}")
+
+# 2. Editor Configuration
+# We use TextColumn to respect the commas, but we need to clean them later
+disabled_cols = df_formatted.columns if not is_unlocked else ["Year 0"]
 
 edited_df = st.data_editor(
-    df_display,
+    df_formatted,
     use_container_width=True,
     disabled=disabled_cols,
-    key=f"editor_{st.session_state.reset_key}",
-    column_config={
-        # Format with currency symbol (Streamlit handles commas in display mode automatically)
-        col: st.column_config.NumberColumn(format=f"{curr_symbol} %.2f") for col in display_cols
-    }
+    key=f"editor_{st.session_state.reset_key}"
 )
 
 # ==========================================
-# 7. VALUATION LOGIC
+# 7. VALUATION LOGIC (CLEANING INPUTS)
 # ==========================================
 try:
+    # Helper to clean "$1,234.56" back to float 1234.56
+    def clean_num(val):
+        if isinstance(val, (int, float)): return val
+        return float(str(val).replace(',', '').replace('$', '').replace('€','').replace('£','').replace('¥',''))
+
     fcf_stream = []
     
     for y in years:
         col_name = f"Year {y}"
-        rev_edit = edited_df.loc['Revenue', col_name] / 1000
-        ebit_edit = edited_df.loc['EBIT', col_name] / 1000
-        da_edit = edited_df.loc['D&A', col_name] / 1000
-        capex_edit = edited_df.loc['Capex', col_name] / 1000
+        
+        # Clean and Scale back to Billions (/1000)
+        rev_edit = clean_num(edited_df.loc['Revenue', col_name]) / 1000
+        ebit_edit = clean_num(edited_df.loc['EBIT', col_name]) / 1000
+        da_edit = clean_num(edited_df.loc['D&A', col_name]) / 1000
+        capex_edit = clean_num(edited_df.loc['Capex', col_name]) / 1000
         
         prev_col = f"Year {y-1}"
-        rev_prev = edited_df.loc['Revenue', prev_col] / 1000
+        rev_prev = clean_num(edited_df.loc['Revenue', prev_col]) / 1000
         dnwc = (rev_edit - rev_prev) * 0.02
         
         nopat = ebit_edit * (1 - tax_rate)
@@ -335,21 +343,14 @@ def make_bridge(pv_fcf, pv_tv, ev, debt, cash, eq):
         "Value": [pv_fcf, pv_tv, ev, debt-cash, eq]
     }).set_index("Component")
 
-# Scale bridge values to Millions to match the projection table
-# Note: Inputs are in Billions, so multiply by 1000 to get Millions
-bridge_format = f"{curr_symbol}{{:.2f}}M"
-
-# Calculate bridge values in Millions
-bridge_g = make_bridge(sum_pv_final * 1000, pv_tv_g * 1000, ev_g * 1000, debt_in * 1000, cash_in * 1000, ev_g * 1000 - (debt_in * 1000 - cash_in * 1000))
-bridge_e = make_bridge(sum_pv_final * 1000, pv_tv_e * 1000, ev_e * 1000, debt_in * 1000, cash_in * 1000, ev_e * 1000 - (debt_in * 1000 - cash_in * 1000))
+bridge_format = f"{curr_symbol}{{:,.2f}}B"
 
 with c_g:
     st.markdown(f"""<div class="val-card border-purple"><div class="val-title">Perpetuity Growth 🌊</div><div class="val-sub">Based on {safe_ltg:.1%} long-term growth</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-purple">{curr_symbol}{p_g:,.2f}</div><div class="val-ev"><span>Enterprise Value</span><strong>{curr_symbol}{ev_g:,.2f}B</strong></div></div>""", unsafe_allow_html=True)
-    st.markdown(f"##### Bridge (Gordon) - Millions {curr_symbol}")
-    # Apply format to the styling wrapper
-    st.dataframe(bridge_g.style.format("{:,.2f}"), use_container_width=True)
+    st.markdown("##### Bridge (Gordon)")
+    st.dataframe(make_bridge(sum_pv_final, pv_tv_g, ev_g, debt_in, cash_in, ev_g-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
 
 with c_e:
     st.markdown(f"""<div class="val-card border-green"><div class="val-title">Exit Multiple 💼</div><div class="val-sub">Based on {exit_mult}x EBITDA multiple</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-green">{curr_symbol}{p_e:,.2f}</div><div class="val-ev"><span>Enterprise Value</span><strong>{curr_symbol}{ev_e:,.2f}B</strong></div></div>""", unsafe_allow_html=True)
-    st.markdown(f"##### Bridge (Multiple) - Millions {curr_symbol}")
-    st.dataframe(bridge_e.style.format("{:,.2f}"), use_container_width=True)
+    st.markdown("##### Bridge (Multiple)")
+    st.dataframe(make_bridge(sum_pv_final, pv_tv_e, ev_e, debt_in, cash_in, ev_e-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
