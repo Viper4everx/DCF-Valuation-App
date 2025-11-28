@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-import re
 
 # ==========================================
 # 1. CONFIGURATION & STYLING
@@ -111,7 +110,7 @@ def get_yahoo_data(ticker):
 # ==========================================
 # 3. UI: INPUTS
 # ==========================================
-c_tick, c_space = st.columns([1, 4])
+c_tick, _ = st.columns([1, 4])
 ticker = c_tick.text_input("Ticker", "NVDA").upper()
 
 if 'y0' not in st.session_state:
@@ -154,28 +153,25 @@ if ticker:
     if st.session_state.get('fx_msg'):
         st.info(f"💱 {st.session_state.fx_msg}")
 
-# Year 0 Form
-st.markdown("### Year 0: Base Financials (Billions)")
-with st.expander("Expand to edit Year 0 Data", expanded=True):
-    with st.form("y0_form"):
-        c1, c2, c3, c4 = st.columns(4)
-        r_in = c1.number_input("Revenue", value=st.session_state.y0['Revenue'], format="%.3f")
-        e_in = c2.number_input("EBIT", value=st.session_state.y0['EBIT'], format="%.3f")
-        d_in = c3.number_input("D&A", value=st.session_state.y0['Depreciation'], format="%.3f")
-        c_in = c4.number_input("Capex", value=st.session_state.y0['Capex'], format="%.3f")
-        c5, c6, c7 = st.columns(3)
-        debt_in = c5.number_input("Total Debt", value=st.session_state.y0['Debt'], format="%.3f")
-        cash_in = c6.number_input("Total Cash", value=st.session_state.y0['Cash'], format="%.3f")
-        shares_in = c7.number_input("Shares (B)", value=shares_def, format="%.3f")
-        st.form_submit_button("Update Model")
+# Initialize variables from session state (replacing the old form)
+r_in = st.session_state.y0['Revenue']
+e_in = st.session_state.y0['EBIT']
+d_in = st.session_state.y0['Depreciation']
+c_in = st.session_state.y0['Capex']
 
 # ==========================================
-# 4. SMART DRIVERS
+# 4. SMART DRIVERS & BALANCE SHEET (SIDEBAR)
 # ==========================================
 with st.sidebar:
     st.header("Assumptions")
     wacc = st.number_input("WACC %", value=9.0, step=0.1, format="%.1f", key=f"wacc_{ticker}") / 100
     
+    # Moved Debt/Cash/Shares here since the form is gone
+    st.markdown("### Balance Sheet (B)")
+    debt_in = st.number_input("Total Debt", value=st.session_state.y0['Debt'], format="%.3f")
+    cash_in = st.number_input("Total Cash", value=st.session_state.y0['Cash'], format="%.3f")
+    shares_in = st.number_input("Shares (B)", value=shares_def, format="%.3f")
+
     st.divider()
     st.subheader("Drivers")
     st.caption(f"Detected Industry: {industry_name}")
@@ -228,7 +224,7 @@ df_base = pd.DataFrame(base_data).set_index('Year')
 # ==========================================
 st.divider()
 
-c_title, c_space, c_toggle, c_reset = st.columns([6, 2.5, 0.8, 0.7], vertical_alignment="bottom")
+c_title, _, c_toggle, c_reset = st.columns([6, 2.5, 0.8, 0.7], vertical_alignment="bottom")
 
 with c_title:
     st.subheader(f"Projected Free Cash Flow (Millions {curr_symbol})")
@@ -250,8 +246,8 @@ df_display.columns = [f"Year {y}" for y in range(6)]
 df_formatted = df_display.applymap(lambda x: f"{x:,.2f}")
 
 # 2. Editor Configuration
-# We use TextColumn to respect the commas, but we need to clean them later
-disabled_cols = df_formatted.columns if not is_unlocked else ["Year 0"]
+# If unlocked, allow editing EVERYTHING (including Year 0). If locked, disable all.
+disabled_cols = df_formatted.columns if not is_unlocked else []
 
 edited_df = st.data_editor(
     df_formatted,
