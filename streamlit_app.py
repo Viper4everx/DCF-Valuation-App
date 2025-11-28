@@ -153,7 +153,7 @@ if ticker:
     if st.session_state.get('fx_msg'):
         st.info(f"💱 {st.session_state.fx_msg}")
 
-# Initialize variables from session state (replacing the old form)
+# Initialize variables from session state
 r_in = st.session_state.y0['Revenue']
 e_in = st.session_state.y0['EBIT']
 d_in = st.session_state.y0['Depreciation']
@@ -166,7 +166,6 @@ with st.sidebar:
     st.header("Assumptions")
     wacc = st.number_input("WACC %", value=9.0, step=0.1, format="%.1f", key=f"wacc_{ticker}") / 100
     
-    # Moved Debt/Cash/Shares here since the form is gone
     st.markdown("### Balance Sheet (B)")
     debt_in = st.number_input("Total Debt", value=st.session_state.y0['Debt'], format="%.3f")
     cash_in = st.number_input("Total Cash", value=st.session_state.y0['Cash'], format="%.3f")
@@ -246,7 +245,6 @@ df_display.columns = [f"Year {y}" for y in range(6)]
 df_formatted = df_display.applymap(lambda x: f"{x:,.2f}")
 
 # 2. Editor Configuration
-# If unlocked, allow editing EVERYTHING (including Year 0). If locked, disable all.
 disabled_cols = df_formatted.columns if not is_unlocked else []
 
 edited_df = st.data_editor(
@@ -325,7 +323,11 @@ if cur_price > 0 and r_in > 0:
     st.markdown(f"""
     <div class="glass-card" style="display:flex; justify-content: space-around; align-items: center;">
         <div style="text-align:center;"><div class="val-label">CURRENT PRICE</div><div class="val-price">{curr_symbol}{cur_price:,.2f}</div></div>
-        <div style="text-align:center;"><div class="val-label">INTRINSIC VALUE</div><div class="val-price text-blue">{curr_symbol}{avg_int:,.2f}</div></div>
+        <div style="text-align:center;">
+            <div class="val-label">INTRINSIC VALUE</div>
+            <div class="val-price text-blue" style="margin-bottom: 5px;">{curr_symbol}{avg_int:,.2f}</div>
+            <div style="font-size: 10px; opacity: 0.6; font-weight: 400;">(Average Implied Value)</div>
+        </div>
         <div style="text-align:center;"><div class="val-label">UPSIDE</div><div class="val-price {s_col}">{mos_pct:+.1%}</div><div class="{s_col}">{s_txt}</div></div>
     </div>
     """, unsafe_allow_html=True)
