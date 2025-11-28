@@ -38,7 +38,7 @@ div[data-testid="stExpander"] { background-color: rgba(255,255,255,0.02); border
 st.markdown('<h1 style="text-align:center; margin-bottom: 30px;">DCF Valuation Tool</h1>', unsafe_allow_html=True)
 
 # ==========================================
-# 2. DATA ENGINE (OPTIMIZED)
+# 2. DATA ENGINE
 # ==========================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_yahoo_data(ticker):
@@ -226,26 +226,24 @@ else:
 df_base = pd.DataFrame(base_data).set_index('Year')
 
 # ==========================================
-# 6. INTERACTIVE TABLE (RIGHT ALIGNED TOOLS)
+# 6. INTERACTIVE TABLE (TIGHT LAYOUT)
 # ==========================================
 st.divider()
 
-# Layout: Title (Left) | Spacer | Tools (Far Right)
-# [4, 4, 2] pushes the tools column to the far right 20% of screen
-c_title, c_space, c_tools = st.columns([4, 4, 2], vertical_alignment="bottom")
+# Layout: Title (60%) | Spacer (25%) | Toggle (8%) | Reset (7%)
+# vertical_alignment="bottom" ensures they sit on the same baseline
+c_title, c_space, c_toggle, c_reset = st.columns([6, 2.5, 0.8, 0.7], vertical_alignment="bottom")
 
 with c_title:
     st.subheader(f"Projected Free Cash Flow (Millions {curr_symbol})")
 
-with c_tools:
-    # Nested columns for tight spacing of Toggle + Button
-    t_col, b_col = st.columns([1, 1], gap="small")
-    with t_col:
-        is_unlocked = st.toggle("Unlock", value=False)
-    with b_col:
-        if st.button("Reset", use_container_width=True):
-            st.session_state.reset_key += 1
-            st.rerun()
+with c_toggle:
+    is_unlocked = st.toggle("Unlock", value=False)
+
+with c_reset:
+    if st.button("↺ Reset", use_container_width=True):
+        st.session_state.reset_key += 1
+        st.rerun()
 
 # Logic to disable columns
 display_cols = [f"Year {y}" for y in range(6)]
