@@ -230,22 +230,22 @@ df_base = pd.DataFrame(base_data).set_index('Year')
 # ==========================================
 st.divider()
 
-# Layout: Title (Left) | Spacer | Lock & Reset (Far Right)
-# [6, 1, 1] keeps buttons tight to the right side
-c_title, c_lock, c_reset = st.columns([6, 1, 1])
+# Layout: Title (Left) | Spacer | Tools (Far Right)
+# Use vertical_alignment to keep toggle/button aligned
+c_title, c_space, c_tools = st.columns([5, 3, 2], vertical_alignment="bottom")
 
 with c_title:
     st.subheader(f"Projected Free Cash Flow (Millions {curr_symbol})")
 
-with c_lock:
-    # LOCK TOGGLE
-    is_unlocked = st.toggle("Unlock", value=False)
-
-with c_reset:
-    # RESET BUTTON (Small)
-    if st.button("↺ Reset"):
-        st.session_state.reset_key += 1
-        st.rerun()
+with c_tools:
+    # Nest columns for tight spacing
+    t_col, b_col = st.columns([1, 1], gap="small")
+    with t_col:
+        is_unlocked = st.toggle("Unlock", value=False)
+    with b_col:
+        if st.button("↺ Reset", use_container_width=True):
+            st.session_state.reset_key += 1
+            st.rerun()
 
 # Logic to disable columns
 display_cols = [f"Year {y}" for y in range(6)]
