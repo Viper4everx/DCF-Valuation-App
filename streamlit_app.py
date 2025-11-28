@@ -40,30 +40,28 @@ st.markdown('<h1 style="text-align:center; margin-bottom: 30px;">DCF Valuation T
 # 2. HELPER FUNCTIONS
 # ==========================================
 def fmt_comma(val):
-    """Formats a number as a string with commas (e.g. 10,000)"""
-    return f"{val:,.0f}"
+    """Formats 130497.23 -> '130,497.23'"""
+    if pd.isna(val): return "0.00"
+    return f"{val:,.2f}"
 
-def clean_currency(val, symbol="$"):
-    """Cleans a string (e.g. '$ 10,000') back to a float (10000.0)"""
+def clean_currency(val):
+    """Cleans '130,497.23' -> 130497.23"""
     if isinstance(val, (int, float)): return float(val)
     if pd.isna(val) or val == "": return 0.0
-    
-    # Remove common currency symbols and commas
-    clean = str(val).replace(',', '').replace(symbol, '').replace('€', '').replace('£', '').replace('¥', '').strip()
+    clean = str(val).replace(',', '').replace('$', '').replace('€', '').replace('£', '').replace('¥', '').strip()
     try:
         return float(clean)
     except ValueError:
         return 0.0
 
 # ==========================================
-# 3. DATA ENGINE (Yahoo Finance)
+# 3. DATA ENGINE (MILLIONS)
 # ==========================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_yahoo_data(ticker):
     try:
         tk = yf.Ticker(ticker)
         
-        # 1. Market Data
         try: price = tk.fast_info.last_price
         except: 
             hist = tk.history(period="1d")
@@ -74,14 +72,13 @@ def get_yahoo_data(ticker):
         if not shares: 
             try: shares = tk.fast_info.shares_outstanding
             except: pass
-        if not shares: shares = 1e9 # Safety default
+        if not shares: shares = 1e9
         
-        # Convert Shares to Millions (to match financials)
+        # SHARES IN MILLIONS
         shares = shares / 1e6 
 
         industry = tk.info.get('industry', 'Unknown')
         
-        # 2. Currency Logic
         price_curr = tk.info.get('currency', 'USD')
         fin_curr = tk.info.get('financialCurrency', price_curr)
         
@@ -99,7 +96,6 @@ def get_yahoo_data(ticker):
             except:
                 fx_msg = f"⚠️ FX Error: Could not fetch rate for {pair}."
 
-        # 3. Financial Statements
         inc = tk.income_stmt
         bs = tk.balance_sheet
         cf = tk.cashflow
@@ -113,7 +109,7 @@ def get_yahoo_data(ticker):
             return 0.0
 
         data = {}
-        # Convert to MILLIONS (1e6) and apply FX
+        # UNIFIED UNIT: MILLIONS (Divide by 1e6)
         factor = fx_rate / 1e6 
         
         data['Revenue'] = get_val(inc, ['Total Revenue', 'Total Net Sales', 'Total Interest Income']) * factor
@@ -184,7 +180,7 @@ with st.expander("Expand to edit Year 0 Data", expanded=True):
     with st.form("y0_form"):
         c1, c2, c3, c4 = st.columns(4)
         
-        # Use TEXT inputs to allow comma formatting (e.g. "130,497")
+        # Display as Text with Commas (e.g. "130,497.00")
         r_in_str = c1.text_input("Revenue", value=fmt_comma(st.session_state.y0['Revenue']))
         e_in_str = c2.text_input("EBIT", value=fmt_comma(st.session_state.y0['EBIT']))
         d_in_str = c3.text_input("D&A", value=fmt_comma(st.session_state.y0['Depreciation']))
@@ -195,7 +191,7 @@ with st.expander("Expand to edit Year 0 Data", expanded=True):
         cash_in_str = c6.text_input("Total Cash", value=fmt_comma(st.session_state.y0['Cash']))
         shares_in_str = c7.text_input("Shares (Millions)", value=fmt_comma(shares_def))
         
-        # Clean inputs for calculation
+        # Parse back to float for math
         r_in = clean_currency(r_in_str)
         e_in = clean_currency(e_in_str)
         d_in = clean_currency(d_in_str)
@@ -204,12 +200,10 @@ with st.expander("Expand to edit Year 0 Data", expanded=True):
         cash_in = clean_currency(cash_in_str)
         shares_in = clean_currency(shares_in_str)
         
-        if shares_in == 0: shares_in = 1.0 # Prevent div/0
-        
         st.form_submit_button("Update Model")
 
 # ==========================================
-# 5. SMART DRIVERS & CALCULATION
+# 5. SMART DRIVERS
 # ==========================================
 with st.sidebar:
     st.header("Assumptions")
@@ -232,7 +226,9 @@ with st.sidebar:
     ltg = st.number_input("Terminal Growth %", value=2.5, step=0.1, format="%.1f", key=f"l_{ticker}") / 100
     exit_mult = st.number_input("Exit Multiple (x)", value=def_mult, step=0.5, format="%.1f", key=f"e_{ticker}")
 
-# Base Calculation
+# ==========================================
+# 6. CALCULATION & INTERACTIVE TABLE
+# ==========================================
 years = range(1, 6)
 base_data = []
 safe_ltg = ltg if ltg < wacc else (wacc - 0.005)
@@ -260,9 +256,6 @@ else:
 
 df_base = pd.DataFrame(base_data).set_index('Year')
 
-# ==========================================
-# 6. INTERACTIVE TABLE
-# ==========================================
 st.divider()
 
 c_title, c_space, c_tools = st.columns([5, 3, 2], vertical_alignment="bottom")
@@ -282,16 +275,19 @@ with c_tools:
 display_cols = [f"Year {y}" for y in range(6)]
 disabled_cols = display_cols if not is_unlocked else ["Year 0"]
 
+# Format the dataframe using Streamlit's NumberColumn format string
+# "$ %,.2f" adds currency symbol and comma separators
 df_display = df_base.T
 df_display.columns = display_cols
-# Apply display formatting with currency and commas
-df_formatted = df_display.applymap(lambda x: f"{curr_symbol} {x:,.2f}")
 
 edited_df = st.data_editor(
-    df_formatted,
+    df_display,
     use_container_width=True,
     disabled=disabled_cols,
-    key=f"editor_{st.session_state.reset_key}"
+    key=f"editor_{st.session_state.reset_key}",
+    column_config={
+        col: st.column_config.NumberColumn(format=f"{curr_symbol} %,.2f") for col in display_cols
+    }
 )
 
 # ==========================================
@@ -302,14 +298,14 @@ try:
     
     for y in years:
         col_name = f"Year {y}"
-        # Parse numbers from editor (already in Millions)
-        rev_edit = clean_currency(edited_df.loc['Revenue', col_name], curr_symbol)
-        ebit_edit = clean_currency(edited_df.loc['EBIT', col_name], curr_symbol)
-        da_edit = clean_currency(edited_df.loc['D&A', col_name], curr_symbol)
-        capex_edit = clean_currency(edited_df.loc['Capex', col_name], curr_symbol)
+        # Values come back as numbers from NumberColumn, no text cleaning needed
+        rev_edit = edited_df.loc['Revenue', col_name]
+        ebit_edit = edited_df.loc['EBIT', col_name]
+        da_edit = edited_df.loc['D&A', col_name]
+        capex_edit = edited_df.loc['Capex', col_name]
         
         prev_col = f"Year {y-1}"
-        rev_prev = clean_currency(edited_df.loc['Revenue', prev_col], curr_symbol)
+        rev_prev = edited_df.loc['Revenue', prev_col]
         dnwc = (rev_edit - rev_prev) * 0.02
         
         nopat = ebit_edit * (1 - tax_rate)
@@ -371,6 +367,7 @@ def make_bridge(pv_fcf, pv_tv, ev, debt, cash, eq):
         "Value": [pv_fcf, pv_tv, ev, debt-cash, eq]
     }).set_index("Component")
 
+# Bridges formatted in Millions
 bridge_format = f"{curr_symbol}{{:,.2f}}M"
 
 with c_g:
