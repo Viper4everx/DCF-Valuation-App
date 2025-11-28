@@ -32,9 +32,6 @@ body { font-family: 'Inter', sans-serif; background: linear-gradient(135deg, #1e
 .border-green { border-left: 5px solid #10b981; }
 
 div[data-testid="stExpander"] { background-color: rgba(255,255,255,0.02); border-radius: 12px; }
-
-/* Tighten Layout for Tools */
-div[data-testid="column"] { gap: 0px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -120,6 +117,7 @@ ticker = c_tick.text_input("Ticker", "NVDA").upper()
 if 'y0' not in st.session_state:
     st.session_state.y0 = {k:0.0 for k in ['Revenue','EBIT','Depreciation','Capex','Debt','Cash']}
 
+# Session State for Resetting Table
 if 'reset_key' not in st.session_state:
     st.session_state.reset_key = 0
 
@@ -185,6 +183,7 @@ with st.sidebar:
     
     current_margin = (e_in / r_in) if r_in > 0 else 0.0
     
+    # Smart Defaults
     if current_margin > 0.30: def_growth, def_mult = 15.0, 25.0
     elif current_margin < 0.10: def_growth, def_mult = 3.0, 8.0
     else: def_growth, def_mult = 5.0, 12.0
@@ -227,25 +226,24 @@ else:
 df_base = pd.DataFrame(base_data).set_index('Year')
 
 # ==========================================
-# 6. INTERACTIVE TABLE (FIXED ALIGNMENT)
+# 6. INTERACTIVE TABLE (RIGHT ALIGNED TOOLS)
 # ==========================================
 st.divider()
 
-# Layout: Title (85%) | Tools (15%) aligned to bottom
-# This ratio [5, 1] closely matches the 6-column table structure (5 columns vs last column)
-c_title, c_tools = st.columns([5, 1], vertical_alignment="bottom")
+# Layout: Title (Left) | Spacer | Tools (Far Right)
+# [4, 4, 2] pushes the tools column to the far right 20% of screen
+c_title, c_space, c_tools = st.columns([4, 4, 2], vertical_alignment="bottom")
 
 with c_title:
     st.subheader(f"Projected Free Cash Flow (Millions {curr_symbol})")
 
 with c_tools:
-    # Use nested columns to put Toggle and Button side-by-side in that small space
-    # [1.5, 1] gives the toggle a bit more room for the text "Unlock"
-    t_col, b_col = st.columns([1.5, 1], gap="small")
+    # Nested columns for tight spacing of Toggle + Button
+    t_col, b_col = st.columns([1, 1], gap="small")
     with t_col:
         is_unlocked = st.toggle("Unlock", value=False)
     with b_col:
-        if st.button("Reset", help="Restore default values"):
+        if st.button("Reset", use_container_width=True):
             st.session_state.reset_key += 1
             st.rerun()
 
