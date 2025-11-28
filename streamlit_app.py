@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
+import re
 
 # ==========================================
 # 1. CONFIGURATION & STYLING
@@ -37,25 +38,7 @@ div[data-testid="stExpander"] { background-color: rgba(255,255,255,0.02); border
 st.markdown('<h1 style="text-align:center; margin-bottom: 30px;">DCF Valuation Tool</h1>', unsafe_allow_html=True)
 
 # ==========================================
-# 2. HELPER FUNCTIONS
-# ==========================================
-def fmt_comma(val):
-    """Formats 130497.23 -> '130,497.23'"""
-    if pd.isna(val): return "0.00"
-    return f"{val:,.2f}"
-
-def clean_currency(val):
-    """Cleans '130,497.23' -> 130497.23"""
-    if isinstance(val, (int, float)): return float(val)
-    if pd.isna(val) or val == "": return 0.0
-    clean = str(val).replace(',', '').replace('$', '').replace('€', '').replace('£', '').replace('¥', '').strip()
-    try:
-        return float(clean)
-    except ValueError:
-        return 0.0
-
-# ==========================================
-# 3. DATA ENGINE (MILLIONS)
+# 2. DATA ENGINE
 # ==========================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_yahoo_data(ticker):
@@ -73,9 +56,7 @@ def get_yahoo_data(ticker):
             try: shares = tk.fast_info.shares_outstanding
             except: pass
         if not shares: shares = 1e9
-        
-        # SHARES IN MILLIONS
-        shares = shares / 1e6 
+        shares = shares / 1e9 
 
         industry = tk.info.get('industry', 'Unknown')
         
@@ -109,8 +90,7 @@ def get_yahoo_data(ticker):
             return 0.0
 
         data = {}
-        # UNIFIED UNIT: MILLIONS (Divide by 1e6)
-        factor = fx_rate / 1e6 
+        factor = fx_rate / 1e9 
         
         data['Revenue'] = get_val(inc, ['Total Revenue', 'Total Net Sales', 'Total Interest Income']) * factor
         data['EBIT']    = get_val(inc, ['Operating Income', 'EBIT', 'Operating Profit']) * factor
@@ -129,7 +109,7 @@ def get_yahoo_data(ticker):
         return None, 0.0, 1.0, str(e), "USD", "Unknown"
 
 # ==========================================
-# 4. UI: INPUTS
+# 3. UI: INPUTS
 # ==========================================
 c_tick, c_space = st.columns([1, 4])
 ticker = c_tick.text_input("Ticker", "NVDA").upper()
@@ -175,35 +155,22 @@ if ticker:
         st.info(f"💱 {st.session_state.fx_msg}")
 
 # Year 0 Form
-st.markdown("### Year 0: Base Financials (Millions)")
+st.markdown("### Year 0: Base Financials (Billions)")
 with st.expander("Expand to edit Year 0 Data", expanded=True):
     with st.form("y0_form"):
         c1, c2, c3, c4 = st.columns(4)
-        
-        # Display as Text with Commas (e.g. "130,497.00")
-        r_in_str = c1.text_input("Revenue", value=fmt_comma(st.session_state.y0['Revenue']))
-        e_in_str = c2.text_input("EBIT", value=fmt_comma(st.session_state.y0['EBIT']))
-        d_in_str = c3.text_input("D&A", value=fmt_comma(st.session_state.y0['Depreciation']))
-        c_in_str = c4.text_input("Capex", value=fmt_comma(st.session_state.y0['Capex']))
-        
+        r_in = c1.number_input("Revenue", value=st.session_state.y0['Revenue'], format="%.3f")
+        e_in = c2.number_input("EBIT", value=st.session_state.y0['EBIT'], format="%.3f")
+        d_in = c3.number_input("D&A", value=st.session_state.y0['Depreciation'], format="%.3f")
+        c_in = c4.number_input("Capex", value=st.session_state.y0['Capex'], format="%.3f")
         c5, c6, c7 = st.columns(3)
-        debt_in_str = c5.text_input("Total Debt", value=fmt_comma(st.session_state.y0['Debt']))
-        cash_in_str = c6.text_input("Total Cash", value=fmt_comma(st.session_state.y0['Cash']))
-        shares_in_str = c7.text_input("Shares (Millions)", value=fmt_comma(shares_def))
-        
-        # Parse back to float for math
-        r_in = clean_currency(r_in_str)
-        e_in = clean_currency(e_in_str)
-        d_in = clean_currency(d_in_str)
-        c_in = clean_currency(c_in_str)
-        debt_in = clean_currency(debt_in_str)
-        cash_in = clean_currency(cash_in_str)
-        shares_in = clean_currency(shares_in_str)
-        
+        debt_in = c5.number_input("Total Debt", value=st.session_state.y0['Debt'], format="%.3f")
+        cash_in = c6.number_input("Total Cash", value=st.session_state.y0['Cash'], format="%.3f")
+        shares_in = c7.number_input("Shares (B)", value=shares_def, format="%.3f")
         st.form_submit_button("Update Model")
 
 # ==========================================
-# 5. SMART DRIVERS
+# 4. SMART DRIVERS
 # ==========================================
 with st.sidebar:
     st.header("Assumptions")
@@ -227,7 +194,7 @@ with st.sidebar:
     exit_mult = st.number_input("Exit Multiple (x)", value=def_mult, step=0.5, format="%.1f", key=f"e_{ticker}")
 
 # ==========================================
-# 6. CALCULATION & INTERACTIVE TABLE
+# 5. BASE CALCULATION ENGINE
 # ==========================================
 years = range(1, 6)
 base_data = []
@@ -256,56 +223,65 @@ else:
 
 df_base = pd.DataFrame(base_data).set_index('Year')
 
+# ==========================================
+# 6. INTERACTIVE TABLE (FORMATTED)
+# ==========================================
 st.divider()
 
-c_title, c_space, c_tools = st.columns([5, 3, 2], vertical_alignment="bottom")
+c_title, c_space, c_toggle, c_reset = st.columns([6, 2.5, 0.8, 0.7], vertical_alignment="bottom")
 
 with c_title:
     st.subheader(f"Projected Free Cash Flow (Millions {curr_symbol})")
 
-with c_tools:
-    t_col, b_col = st.columns([1, 1], gap="small")
-    with t_col:
-        is_unlocked = st.toggle("Unlock", value=False)
-    with b_col:
-        if st.button("↺ Reset", use_container_width=True):
-            st.session_state.reset_key += 1
-            st.rerun()
+with c_toggle:
+    is_unlocked = st.toggle("Unlock", value=False)
 
-display_cols = [f"Year {y}" for y in range(6)]
-disabled_cols = display_cols if not is_unlocked else ["Year 0"]
+with c_reset:
+    if st.button("↺ Reset", use_container_width=True):
+        st.session_state.reset_key += 1
+        st.rerun()
 
-# Format the dataframe using Streamlit's NumberColumn format string
-# "$ %,.2f" adds currency symbol and comma separators
-df_display = df_base.T
-df_display.columns = display_cols
+# 1. Format numbers to strings with commas ("10,000.50") for visual display
+# We multiply by 1000 to get Millions
+df_display = (df_base * 1000).T
+df_display.columns = [f"Year {y}" for y in range(6)]
+
+# Apply comma formatting to creating a string version
+df_formatted = df_display.applymap(lambda x: f"{x:,.2f}")
+
+# 2. Editor Configuration
+# We use TextColumn to respect the commas, but we need to clean them later
+disabled_cols = df_formatted.columns if not is_unlocked else ["Year 0"]
 
 edited_df = st.data_editor(
-    df_display,
+    df_formatted,
     use_container_width=True,
     disabled=disabled_cols,
-    key=f"editor_{st.session_state.reset_key}",
-    column_config={
-        col: st.column_config.NumberColumn(format=f"{curr_symbol} %,.2f") for col in display_cols
-    }
+    key=f"editor_{st.session_state.reset_key}"
 )
 
 # ==========================================
-# 7. VALUATION LOGIC
+# 7. VALUATION LOGIC (CLEANING INPUTS)
 # ==========================================
 try:
+    # Helper to clean "$1,234.56" back to float 1234.56
+    def clean_num(val):
+        if isinstance(val, (int, float)): return val
+        return float(str(val).replace(',', '').replace('$', '').replace('€','').replace('£','').replace('¥',''))
+
     fcf_stream = []
     
     for y in years:
         col_name = f"Year {y}"
-        # Values come back as numbers from NumberColumn, no text cleaning needed
-        rev_edit = edited_df.loc['Revenue', col_name]
-        ebit_edit = edited_df.loc['EBIT', col_name]
-        da_edit = edited_df.loc['D&A', col_name]
-        capex_edit = edited_df.loc['Capex', col_name]
+        
+        # Clean and Scale back to Billions (/1000)
+        rev_edit = clean_num(edited_df.loc['Revenue', col_name]) / 1000
+        ebit_edit = clean_num(edited_df.loc['EBIT', col_name]) / 1000
+        da_edit = clean_num(edited_df.loc['D&A', col_name]) / 1000
+        capex_edit = clean_num(edited_df.loc['Capex', col_name]) / 1000
         
         prev_col = f"Year {y-1}"
-        rev_prev = edited_df.loc['Revenue', prev_col]
+        rev_prev = clean_num(edited_df.loc['Revenue', prev_col]) / 1000
         dnwc = (rev_edit - rev_prev) * 0.02
         
         nopat = ebit_edit * (1 - tax_rate)
@@ -367,15 +343,14 @@ def make_bridge(pv_fcf, pv_tv, ev, debt, cash, eq):
         "Value": [pv_fcf, pv_tv, ev, debt-cash, eq]
     }).set_index("Component")
 
-# Bridges formatted in Millions
-bridge_format = f"{curr_symbol}{{:,.2f}}M"
+bridge_format = f"{curr_symbol}{{:,.2f}}B"
 
 with c_g:
-    st.markdown(f"""<div class="val-card border-purple"><div class="val-title">Perpetuity Growth 🌊</div><div class="val-sub">Based on {safe_ltg:.1%} long-term growth</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-purple">{curr_symbol}{p_g:,.2f}</div><div class="val-ev"><span>Enterprise Value</span><strong>{curr_symbol}{ev_g:,.2f}M</strong></div></div>""", unsafe_allow_html=True)
-    st.markdown("##### Bridge (Gordon) - Millions")
+    st.markdown(f"""<div class="val-card border-purple"><div class="val-title">Perpetuity Growth 🌊</div><div class="val-sub">Based on {safe_ltg:.1%} long-term growth</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-purple">{curr_symbol}{p_g:,.2f}</div><div class="val-ev"><span>Enterprise Value</span><strong>{curr_symbol}{ev_g:,.2f}B</strong></div></div>""", unsafe_allow_html=True)
+    st.markdown("##### Bridge (Gordon)")
     st.dataframe(make_bridge(sum_pv_final, pv_tv_g, ev_g, debt_in, cash_in, ev_g-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
 
 with c_e:
-    st.markdown(f"""<div class="val-card border-green"><div class="val-title">Exit Multiple 💼</div><div class="val-sub">Based on {exit_mult}x EBITDA multiple</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-green">{curr_symbol}{p_e:,.2f}</div><div class="val-ev"><span>Enterprise Value</span><strong>{curr_symbol}{ev_e:,.2f}M</strong></div></div>""", unsafe_allow_html=True)
-    st.markdown("##### Bridge (Multiple) - Millions")
+    st.markdown(f"""<div class="val-card border-green"><div class="val-title">Exit Multiple 💼</div><div class="val-sub">Based on {exit_mult}x EBITDA multiple</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-green">{curr_symbol}{p_e:,.2f}</div><div class="val-ev"><span>Enterprise Value</span><strong>{curr_symbol}{ev_e:,.2f}B</strong></div></div>""", unsafe_allow_html=True)
+    st.markdown("##### Bridge (Multiple)")
     st.dataframe(make_bridge(sum_pv_final, pv_tv_e, ev_e, debt_in, cash_in, ev_e-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
