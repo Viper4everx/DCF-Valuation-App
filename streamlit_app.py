@@ -40,6 +40,23 @@ div[data-testid="stExpander"] { background-color: rgba(255,255,255,0.02); border
 
 st.markdown('<h1 style="text-align:center; margin-bottom: 30px;">DCF Valuation Tool</h1>', unsafe_allow_html=True)
 
+/* ... specific lines above ... */
+div[data-testid="stExpander"] { background-color: rgba(255,255,255,0.02); border-radius: 12px; }
+
+/* >>> PASTE THE NEW LINES HERE <<< */
+div[data-testid="stButton"] button {
+    min-width: 150px !important;
+    white-space: nowrap !important;
+}
+div[data-testid="stCheckbox"] label {
+    min-width: 100px !important;
+    white-space: nowrap !important;
+}
+/* >>> STOP PASTING HERE <<< */
+
+</style>
+""", unsafe_allow_html=True)
+
 # ==========================================
 # 2. PDF GENERATION ENGINE (Python)
 # ==========================================
