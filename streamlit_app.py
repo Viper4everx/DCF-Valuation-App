@@ -35,15 +35,8 @@ body { font-family: 'Inter', sans-serif; background: linear-gradient(135deg, #1e
 .border-green { border-left: 5px solid #10b981; }
 
 div[data-testid="stExpander"] { background-color: rgba(255,255,255,0.02); border-radius: 12px; }
-</style>
-""", unsafe_allow_html=True)
 
-st.markdown('<h1 style="text-align:center; margin-bottom: 30px;">DCF Valuation Tool</h1>', unsafe_allow_html=True)
-
-/* ... specific lines above ... */
-div[data-testid="stExpander"] { background-color: rgba(255,255,255,0.02); border-radius: 12px; }
-
-/* >>> PASTE THE NEW LINES HERE <<< */
+/* >>> FIXED CSS: This is now safely inside the quotes <<< */
 div[data-testid="stButton"] button {
     min-width: 150px !important;
     white-space: nowrap !important;
@@ -52,10 +45,11 @@ div[data-testid="stCheckbox"] label {
     min-width: 100px !important;
     white-space: nowrap !important;
 }
-/* >>> STOP PASTING HERE <<< */
 
 </style>
 """, unsafe_allow_html=True)
+
+st.markdown('<h1 style="text-align:center; margin-bottom: 30px;">DCF Valuation Tool</h1>', unsafe_allow_html=True)
 
 # ==========================================
 # 2. PDF GENERATION ENGINE (Python)
