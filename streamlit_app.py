@@ -460,7 +460,7 @@ if cur_price > 0 and r_in > 0:
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-c_g, c_e = st.columns([1, 0.5, 1])
+c_g, c_space, c_e = st.columns([1, 0.5, 1])
 def make_bridge(pv_fcf, pv_tv, ev, debt, cash, eq):
     return pd.DataFrame({
         "Component": ["PV of 5y Cash Flows", "PV of Terminal", "Enterprise Value", "Less: Net Debt", "Equity Value"],
