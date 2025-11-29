@@ -348,7 +348,7 @@ df_base = pd.DataFrame(base_data).set_index('Year')
 # ==========================================
 st.divider()
 
-c_title, c_space, c_toggle, c_reset = st.columns([6, 2, .50, 1.5], vertical_alignment="bottom")
+c_title, c_space, c_toggle, c_reset = st.columns([6, 2, .80, 1.5], vertical_alignment="bottom")
 
 with c_title:
     st.subheader(f"Projected Free Cash Flow (Millions {curr_symbol})")
