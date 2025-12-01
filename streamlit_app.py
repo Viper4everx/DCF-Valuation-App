@@ -81,12 +81,12 @@ def create_pdf(ticker, date, price, int_val, upside, wacc, ltg, exit_m, c_curr):
 # 3. HELPER FUNCTIONS
 # ==========================================
 def fmt_comma(val):
-    """Formats number to string with commas: 130497 -> '130,497.23'"""
+    """Formats number to string with commas: 130497 -> '130,497'"""
     if pd.isna(val): return "0.00"
     return f"{val:,.2f}"
 
 def clean_currency(val, symbol="$"):
-    """Cleans string to float: '130,497.23' -> 130497.23"""
+    """Cleans string to float: '130,497.00' -> 130497.0"""
     if isinstance(val, (int, float)): return float(val)
     if pd.isna(val) or val == "": return 0.0
     clean = str(val).replace(',', '').replace(symbol, '').replace('€', '').replace('£', '').replace('¥', '').strip()
@@ -105,6 +105,7 @@ def get_yahoo_data(ticker):
         except: info = {}
         if info is None: info = {}
 
+        # 1. Market Data
         try: price = tk.fast_info.last_price
         except: 
             hist = tk.history(period="1d")
@@ -135,6 +136,7 @@ def get_yahoo_data(ticker):
             except:
                 fx_msg = f"⚠️ FX Error: Could not fetch rate for {pair}."
 
+        # 3. Financial Statements
         inc = tk.income_stmt
         bs = tk.balance_sheet
         cf = tk.cashflow
@@ -228,6 +230,7 @@ with st.expander("Expand to edit Year 0 Data", expanded=True):
         cash_in_str = c6.text_input("Total Cash", value=fmt_comma(st.session_state.y0['Cash']))
         shares_in_str = c7.text_input("Shares (Millions)", value=fmt_comma(shares_def))
         
+        # Convert back to float for math
         r_in = clean_currency(r_in_str, curr_symbol)
         e_in = clean_currency(e_in_str, curr_symbol)
         d_in = clean_currency(d_in_str, curr_symbol)
@@ -306,7 +309,7 @@ else:
 df_base = pd.DataFrame(base_data).set_index('Year')
 
 # ==========================================
-# 8. INTERACTIVE TABLE (WITH COMMAS)
+# 8. INTERACTIVE TABLE
 # ==========================================
 st.divider()
 
@@ -323,19 +326,17 @@ with c_tools:
 display_cols = [f"Year {y}" for y in range(6)]
 disabled_cols = display_cols if not is_unlocked else ["Year 0"]
 
-# Display DF (Numbers)
+# CONVERT DATAFRAME TO STRINGS WITH COMMAS
+# This is the key fix. The data editor sees strings "130,497.00" so it shows commas.
 df_display = df_base.T
 df_display.columns = display_cols
+df_formatted = df_display.applymap(lambda x: f"{x:,.2f}")
 
 edited_df = st.data_editor(
-    df_display,
+    df_formatted,
     use_container_width=True,
     disabled=disabled_cols,
-    key=f"editor_{st.session_state.reset_key}",
-    column_config={
-        # THIS IS THE FIX: "%,.2f" forces the comma separator
-        col: st.column_config.NumberColumn(format=f"{curr_symbol} %,.2f") for col in display_cols
-    }
+    key=f"editor_{st.session_state.reset_key}"
 )
 
 # ==========================================
@@ -345,15 +346,13 @@ try:
     fcf_stream = []
     for y in years:
         col_name = f"Year {y}"
-        
-        # Get values as numbers from the editor
-        rev_edit = edited_df.loc['Revenue', col_name]
-        ebit_edit = edited_df.loc['EBIT', col_name]
-        da_edit = edited_df.loc['D&A', col_name]
-        capex_edit = edited_df.loc['Capex', col_name]
+        rev_edit = clean_currency(edited_df.loc['Revenue', col_name], curr_symbol)
+        ebit_edit = clean_currency(edited_df.loc['EBIT', col_name], curr_symbol)
+        da_edit = clean_currency(edited_df.loc['D&A', col_name], curr_symbol)
+        capex_edit = clean_currency(edited_df.loc['Capex', col_name], curr_symbol)
         
         prev_col = f"Year {y-1}"
-        rev_prev = edited_df.loc['Revenue', prev_col]
+        rev_prev = clean_currency(edited_df.loc['Revenue', prev_col], curr_symbol)
         dnwc = (rev_edit - rev_prev) * 0.02
         
         nopat = ebit_edit * (1 - tax_rate)
