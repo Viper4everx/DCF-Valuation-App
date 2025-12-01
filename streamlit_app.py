@@ -78,15 +78,13 @@ def create_pdf(ticker, date, price, int_val, upside, wacc, ltg, exit_m, c_curr):
     return buffer
 
 # ==========================================
-# 3. HELPER FUNCTIONS (FORMATTING)
+# 3. HELPER FUNCTIONS
 # ==========================================
 def fmt_comma(val):
-    """Formats 130497 -> '130,497.00' for Text Inputs"""
     if pd.isna(val): return "0.00"
     return f"{val:,.2f}"
 
 def clean_currency(val, symbol="$"):
-    """Cleans '130,497.00' -> 130497.0 for Math"""
     if isinstance(val, (int, float)): return float(val)
     if pd.isna(val) or val == "": return 0.0
     clean = str(val).replace(',', '').replace(symbol, '').replace('€', '').replace('£', '').replace('¥', '').strip()
@@ -101,22 +99,33 @@ def get_yahoo_data(ticker):
     try:
         tk = yf.Ticker(ticker)
         
+        # --- SAFE INFO FETCH (Prevents NoneType Crash) ---
+        try:
+            raw_info = tk.info
+            info = raw_info if raw_info is not None else {}
+        except:
+            info = {}
+        # -------------------------------------------------
+
+        # 1. Market Data
         try: price = tk.fast_info.last_price
         except: 
             hist = tk.history(period="1d")
             price = hist['Close'].iloc[-1] if not hist.empty else 0.0
 
-        try: shares = tk.info.get('sharesOutstanding')
-        except: shares = None
+        # Use safe 'info' variable, NOT 'tk.info'
+        shares = info.get('sharesOutstanding')
         if not shares: 
             try: shares = tk.fast_info.shares_outstanding
             except: pass
         if not shares: shares = 1e9
         shares = shares / 1e6 # Millions
 
-        industry = tk.info.get('industry', 'Unknown')
-        price_curr = tk.info.get('currency', 'USD')
-        fin_curr = tk.info.get('financialCurrency', price_curr)
+        industry = info.get('industry', 'Unknown')
+        
+        # 2. Currency Logic
+        price_curr = info.get('currency', 'USD')
+        fin_curr = info.get('financialCurrency', price_curr)
         
         fx_rate = 1.0
         fx_msg = ""
@@ -132,6 +141,7 @@ def get_yahoo_data(ticker):
             except:
                 fx_msg = f"⚠️ FX Error: Could not fetch rate for {pair}."
 
+        # 3. Financial Statements
         inc = tk.income_stmt
         bs = tk.balance_sheet
         cf = tk.cashflow
@@ -145,7 +155,7 @@ def get_yahoo_data(ticker):
             return 0.0
 
         data = {}
-        factor = fx_rate / 1e6 # Millions
+        factor = fx_rate / 1e6 # Convert to Millions
         
         data['Revenue'] = get_val(inc, ['Total Revenue', 'Total Net Sales']) * factor
         data['EBIT']    = get_val(inc, ['Operating Income', 'EBIT']) * factor
@@ -210,13 +220,11 @@ if ticker:
     if st.session_state.get('fx_msg'):
         st.info(f"💱 {st.session_state.fx_msg}")
 
-# YEAR 0 FORM (NOW USING TEXT INPUTS FOR COMMAS)
+# YEAR 0 FORM
 st.markdown("### Year 0: Base Financials (Millions)")
 with st.expander("Expand to edit Year 0 Data", expanded=True):
     with st.form("y0_form"):
         c1, c2, c3, c4 = st.columns(4)
-        
-        # Using TEXT input to allow "130,497.00" format
         r_in_str = c1.text_input("Revenue", value=fmt_comma(st.session_state.y0['Revenue']))
         e_in_str = c2.text_input("EBIT", value=fmt_comma(st.session_state.y0['EBIT']))
         d_in_str = c3.text_input("D&A", value=fmt_comma(st.session_state.y0['Depreciation']))
@@ -227,7 +235,6 @@ with st.expander("Expand to edit Year 0 Data", expanded=True):
         cash_in_str = c6.text_input("Total Cash", value=fmt_comma(st.session_state.y0['Cash']))
         shares_in_str = c7.text_input("Shares (Millions)", value=fmt_comma(shares_def))
         
-        # Clean back to numbers for calculations
         r_in = clean_currency(r_in_str, curr_symbol)
         e_in = clean_currency(e_in_str, curr_symbol)
         d_in = clean_currency(d_in_str, curr_symbol)
@@ -240,7 +247,7 @@ with st.expander("Expand to edit Year 0 Data", expanded=True):
         st.form_submit_button("Update Model")
 
 # ==========================================
-# 6. SCENARIO & DRIVERS
+# 6. DRIVERS (SIDEBAR)
 # ==========================================
 with st.sidebar:
     st.header("Configuration")
@@ -325,14 +332,16 @@ disabled_cols = display_cols if not is_unlocked else ["Year 0"]
 
 df_display = df_base.T
 df_display.columns = display_cols
-# Format as strings with commas for display
 df_formatted = df_display.applymap(lambda x: f"{x:,.2f}")
 
 edited_df = st.data_editor(
     df_formatted,
     use_container_width=True,
     disabled=disabled_cols,
-    key=f"editor_{st.session_state.reset_key}"
+    key=f"editor_{st.session_state.reset_key}",
+    column_config={
+        col: st.column_config.NumberColumn(format=f"{curr_symbol} %,.2f") for col in display_cols
+    }
 )
 
 # ==========================================
@@ -403,7 +412,6 @@ if cur_price > 0 and r_in > 0:
     </div>
     """, unsafe_allow_html=True)
 
-    # PDF Download
     pdf_bytes = create_pdf(ticker, pd.Timestamp.now().strftime('%Y-%m-%d'), cur_price, avg_int, mos_pct, wacc, safe_ltg, exit_mult, curr_symbol)
     pdf_spot.download_button(label="📄 Download PDF", data=pdf_bytes, file_name=f"{ticker}_Valuation.pdf", mime="application/pdf")
 
@@ -435,8 +443,8 @@ st.markdown("<br><hr><br>", unsafe_allow_html=True)
 st.subheader("Sensitivity Analysis 🎯")
 st.caption("Implied Share Price based on WACC vs. Terminal Growth Rate")
 
-# Simplified Re-Calc for Speed
 def quick_dcf_calc(w, t_g):
+    # Simplified re-calc for sensitivity speed
     cap_r = c_in/r_in if r_in else 0
     dep_r = d_in/r_in if r_in else 0
     nwc_r = 0.02
@@ -495,8 +503,8 @@ df_sens.columns.name = "Terminal Growth"
 def style_sens(val):
     if val == 0: return 'background-color: gray; color: white;'
     color = '#2a2a3e' 
-    if val > cur_price * 1.1: color = '#105234' # Dark Green
-    elif val < cur_price * 0.9: color = '#4a151b' # Dark Red
+    if val > cur_price * 1.1: color = '#105234'
+    elif val < cur_price * 0.9: color = '#4a151b'
     return f'background-color: {color}; color: white; border: 1px solid #444;'
 
 st.dataframe(df_sens.style.format(f"{curr_symbol}{{:,.2f}}").applymap(style_sens), use_container_width=True)
