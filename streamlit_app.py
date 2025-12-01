@@ -50,14 +50,12 @@ def create_pdf(ticker, date, price, int_val, upside, wacc, ltg, exit_m, c_curr):
     c = canvas.Canvas(buffer, pagesize=letter)
     width, height = letter
 
-    # Header
     c.setFont("Helvetica-Bold", 24)
     c.drawString(50, height - 50, f"Valuation Report: {ticker}")
     c.setFont("Helvetica", 12)
     c.drawString(50, height - 80, f"Date: {date}")
     c.line(50, height - 100, width - 50, height - 100)
 
-    # Results
     c.setFont("Helvetica-Bold", 18)
     c.drawString(50, height - 140, "Valuation Results")
     c.setFont("Helvetica", 14)
@@ -67,7 +65,6 @@ def create_pdf(ticker, date, price, int_val, upside, wacc, ltg, exit_m, c_curr):
     status = "UNDERVALUED" if upside >= 0 else "OVERVALUED"
     c.drawString(50, height - 210, f"Upside: {upside:+.1%} ({status})")
 
-    # Assumptions
     c.setFont("Helvetica-Bold", 18)
     c.drawString(50, height - 260, "Key Assumptions")
     c.setFont("Helvetica", 12)
@@ -84,12 +81,12 @@ def create_pdf(ticker, date, price, int_val, upside, wacc, ltg, exit_m, c_curr):
 # 3. HELPER FUNCTIONS
 # ==========================================
 def fmt_comma(val):
-    """Formats number to string with commas: 130497 -> '130,497'"""
-    if pd.isna(val): return "0"
-    return f"{val:,.0f}"
+    """Formats number to string with commas: 130497 -> '130,497.23'"""
+    if pd.isna(val): return "0.00"
+    return f"{val:,.2f}"
 
 def clean_currency(val, symbol="$"):
-    """Cleans string to float: '130,497' -> 130497.0"""
+    """Cleans string to float: '130,497.23' -> 130497.23"""
     if isinstance(val, (int, float)): return float(val)
     if pd.isna(val) or val == "": return 0.0
     clean = str(val).replace(',', '').replace(symbol, '').replace('€', '').replace('£', '').replace('¥', '').strip()
@@ -108,7 +105,6 @@ def get_yahoo_data(ticker):
         except: info = {}
         if info is None: info = {}
 
-        # 1. Market Data
         try: price = tk.fast_info.last_price
         except: 
             hist = tk.history(period="1d")
@@ -139,7 +135,6 @@ def get_yahoo_data(ticker):
             except:
                 fx_msg = f"⚠️ FX Error: Could not fetch rate for {pair}."
 
-        # 3. Financial Statements
         inc = tk.income_stmt
         bs = tk.balance_sheet
         cf = tk.cashflow
@@ -218,7 +213,7 @@ if ticker:
     if st.session_state.get('fx_msg'):
         st.info(f"💱 {st.session_state.fx_msg}")
 
-# YEAR 0 FORM (TEXT INPUTS -> NO DECIMALS, WITH COMMAS)
+# YEAR 0 FORM (TEXT INPUTS -> COMMAS)
 st.markdown("### Year 0: Base Financials (Millions)")
 with st.expander("Expand to edit Year 0 Data", expanded=True):
     with st.form("y0_form"):
@@ -311,7 +306,7 @@ else:
 df_base = pd.DataFrame(base_data).set_index('Year')
 
 # ==========================================
-# 8. INTERACTIVE TABLE
+# 8. INTERACTIVE TABLE (WITH COMMAS)
 # ==========================================
 st.divider()
 
@@ -328,16 +323,17 @@ with c_tools:
 display_cols = [f"Year {y}" for y in range(6)]
 disabled_cols = display_cols if not is_unlocked else ["Year 0"]
 
+# Display DF (Numbers)
 df_display = df_base.T
 df_display.columns = display_cols
-df_formatted = df_display.applymap(lambda x: f"{x:,.2f}")
 
 edited_df = st.data_editor(
-    df_formatted,
+    df_display,
     use_container_width=True,
     disabled=disabled_cols,
     key=f"editor_{st.session_state.reset_key}",
     column_config={
+        # THIS IS THE FIX: "%,.2f" forces the comma separator
         col: st.column_config.NumberColumn(format=f"{curr_symbol} %,.2f") for col in display_cols
     }
 )
@@ -349,13 +345,15 @@ try:
     fcf_stream = []
     for y in years:
         col_name = f"Year {y}"
-        rev_edit = clean_currency(edited_df.loc['Revenue', col_name], curr_symbol)
-        ebit_edit = clean_currency(edited_df.loc['EBIT', col_name], curr_symbol)
-        da_edit = clean_currency(edited_df.loc['D&A', col_name], curr_symbol)
-        capex_edit = clean_currency(edited_df.loc['Capex', col_name], curr_symbol)
+        
+        # Get values as numbers from the editor
+        rev_edit = edited_df.loc['Revenue', col_name]
+        ebit_edit = edited_df.loc['EBIT', col_name]
+        da_edit = edited_df.loc['D&A', col_name]
+        capex_edit = edited_df.loc['Capex', col_name]
         
         prev_col = f"Year {y-1}"
-        rev_prev = clean_currency(edited_df.loc['Revenue', prev_col], curr_symbol)
+        rev_prev = edited_df.loc['Revenue', prev_col]
         dnwc = (rev_edit - rev_prev) * 0.02
         
         nopat = ebit_edit * (1 - tax_rate)
@@ -475,10 +473,7 @@ def quick_dcf_calc(w, t_g):
     eq_g = (fcf_pv_sum + pv_tv_g) - (debt_in - cash_in)
     eq_e = (fcf_pv_sum + pv_tv_e) - (debt_in - cash_in)
     
-    price_g = eq_g / shares_in if shares_in > 0 else 0
-    price_e = eq_e / shares_in if shares_in > 0 else 0
-    
-    return (price_g + price_e) / 2
+    return ((eq_g + eq_e) / 2) / shares_in if shares_in > 0 else 0
 
 wacc_range = [wacc - 0.01, wacc - 0.005, wacc, wacc + 0.005, wacc + 0.01]
 ltg_range = [ltg - 0.005, ltg - 0.0025, ltg, ltg + 0.0025, ltg + 0.005]
