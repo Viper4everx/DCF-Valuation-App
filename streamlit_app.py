@@ -15,12 +15,12 @@ st.markdown("""
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
 body { font-family: 'Inter', sans-serif; background: linear-gradient(135deg, #1e1e2f 0%, #2a2a3e 100%); color: #f0f2f6; }
 
-/* Cards */
+/* Cards & Containers */
 .glass-card { background: rgba(255,255,255,0.05); border-radius: 12px; padding: 20px; border: 1px solid rgba(255,255,255,0.1); margin-bottom: 20px; }
 .val-card { background: rgba(255,255,255,0.03); border-radius: 12px; padding: 24px; border: 1px solid rgba(255,255,255,0.08); height: 100%; transition: transform 0.2s; }
 .val-card:hover { transform: translateY(-3px); }
 
-/* Typography */
+/* Typography & Accents */
 .val-label { font-size: 11px; font-weight: 700; opacity: 0.5; letter-spacing: 1px; text-transform: uppercase; }
 .val-price { font-size: 42px; font-weight: 700; margin: 4px 0 16px 0; color: #fff; }
 .val-title { font-size: 18px; font-weight: 600; margin-bottom: 4px; color: #fff; }
@@ -34,6 +34,7 @@ body { font-family: 'Inter', sans-serif; background: linear-gradient(135deg, #1e
 .border-green { border-left: 5px solid #10b981; }
 
 div[data-testid="stExpander"] { background-color: rgba(255,255,255,0.02); border-radius: 12px; }
+th { text-align: center !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -81,12 +82,9 @@ def create_pdf(ticker, date, price, int_val, upside, wacc, ltg, exit_m, c_curr):
 # 3. HELPER FUNCTIONS
 # ==========================================
 def fmt_comma(val):
-    """Formats number to string with commas: 130497 -> '130,497'"""
-    if pd.isna(val): return "0.00"
     return f"{val:,.2f}"
 
 def clean_currency(val, symbol="$"):
-    """Cleans string to float: '130,497' -> 130497.0"""
     if isinstance(val, (int, float)): return float(val)
     if pd.isna(val) or val == "": return 0.0
     clean = str(val).replace(',', '').replace(symbol, '').replace('€', '').replace('£', '').replace('¥', '').strip()
@@ -101,25 +99,29 @@ def get_yahoo_data(ticker):
     try:
         tk = yf.Ticker(ticker)
         
+        try:
+            info = tk.info
+            if info is None: info = {}
+        except: info = {}
+
         # 1. Market Data
         try: price = tk.fast_info.last_price
         except: 
             hist = tk.history(period="1d")
             price = hist['Close'].iloc[-1] if not hist.empty else 0.0
 
-        try: shares = tk.info.get('sharesOutstanding')
-        except: shares = None
+        shares = info.get('sharesOutstanding')
         if not shares: 
             try: shares = tk.fast_info.shares_outstanding
             except: pass
         if not shares: shares = 1e9
         shares = shares / 1e6 # Millions
 
-        industry = tk.info.get('industry', 'Unknown')
+        industry = info.get('industry', 'Unknown')
         
         # 2. Currency Logic
-        price_curr = tk.info.get('currency', 'USD')
-        fin_curr = tk.info.get('financialCurrency', price_curr)
+        price_curr = info.get('currency', 'USD')
+        fin_curr = info.get('financialCurrency', price_curr)
         
         fx_rate = 1.0
         fx_msg = ""
@@ -214,7 +216,7 @@ if ticker:
     if st.session_state.get('fx_msg'):
         st.info(f"💱 {st.session_state.fx_msg}")
 
-# YEAR 0 FORM (TEXT INPUTS -> COMMAS)
+# YEAR 0 FORM
 st.markdown("### Year 0: Base Financials (Millions)")
 with st.expander("Expand to edit Year 0 Data", expanded=True):
     with st.form("y0_form"):
@@ -229,7 +231,6 @@ with st.expander("Expand to edit Year 0 Data", expanded=True):
         cash_in_str = c6.text_input("Total Cash", value=fmt_comma(st.session_state.y0['Cash']))
         shares_in_str = c7.text_input("Shares (Millions)", value=fmt_comma(shares_def))
         
-        # Convert back to float for math
         r_in = clean_currency(r_in_str, curr_symbol)
         e_in = clean_currency(e_in_str, curr_symbol)
         d_in = clean_currency(d_in_str, curr_symbol)
@@ -327,14 +328,16 @@ disabled_cols = display_cols if not is_unlocked else ["Year 0"]
 
 df_display = df_base.T
 df_display.columns = display_cols
-# Apply formatting for display
 df_formatted = df_display.applymap(lambda x: f"{x:,.2f}")
 
 edited_df = st.data_editor(
     df_formatted,
     use_container_width=True,
     disabled=disabled_cols,
-    key=f"editor_{st.session_state.reset_key}"
+    key=f"editor_{st.session_state.reset_key}",
+    column_config={
+        col: st.column_config.NumberColumn(format=f"{curr_symbol} %,.2f") for col in display_cols
+    }
 )
 
 # ==========================================
@@ -344,7 +347,6 @@ try:
     fcf_stream = []
     for y in years:
         col_name = f"Year {y}"
-        # Clean text back to float for math
         rev_edit = clean_currency(edited_df.loc['Revenue', col_name], curr_symbol)
         ebit_edit = clean_currency(edited_df.loc['EBIT', col_name], curr_symbol)
         da_edit = clean_currency(edited_df.loc['D&A', col_name], curr_symbol)
@@ -419,20 +421,26 @@ def make_bridge(pv_fcf, pv_tv, ev, debt, cash, eq):
         "Value": [pv_fcf, pv_tv, ev, debt-cash, eq]
     }).set_index("Component")
 
+# Bridges formatted in Millions
 bridge_format = f"{curr_symbol}{{:,.2f}}M"
+
+# Add spacer to push content down slightly as requested
+st.markdown('<div style="height: 20px;"></div>', unsafe_allow_html=True)
 
 with c_g:
     st.markdown(f"""<div class="val-card border-purple"><div class="val-title">Perpetuity Growth 🌊</div><div class="val-sub">Based on {safe_ltg:.1%} long-term growth</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-purple">{curr_symbol}{p_g:,.2f}</div><div class="val-ev"><span>Enterprise Value</span><strong>{curr_symbol}{ev_g:,.2f}M</strong></div></div>""", unsafe_allow_html=True)
+    st.markdown('<div style="height: 20px;"></div>', unsafe_allow_html=True) # Spacer
     st.markdown("##### Bridge (Gordon) - Millions")
     st.dataframe(make_bridge(sum_pv_final, pv_tv_g, ev_g, debt_in, cash_in, ev_g-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
 
 with c_e:
     st.markdown(f"""<div class="val-card border-green"><div class="val-title">Exit Multiple 💼</div><div class="val-sub">Based on {exit_mult}x EBITDA multiple</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-green">{curr_symbol}{p_e:,.2f}</div><div class="val-ev"><span>Enterprise Value</span><strong>{curr_symbol}{ev_e:,.2f}M</strong></div></div>""", unsafe_allow_html=True)
+    st.markdown('<div style="height: 20px;"></div>', unsafe_allow_html=True) # Spacer
     st.markdown("##### Bridge (Multiple) - Millions")
     st.dataframe(make_bridge(sum_pv_final, pv_tv_e, ev_e, debt_in, cash_in, ev_e-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
 
 # ==========================================
-# 11. SENSITIVITY TABLE (Fixed Logic)
+# 11. SENSITIVITY TABLE
 # ==========================================
 st.markdown("<br><hr><br>", unsafe_allow_html=True)
 st.subheader("Sensitivity Analysis 🎯")
@@ -440,45 +448,50 @@ st.caption("Implied Share Price based on WACC vs. Terminal Growth Rate")
 
 # Helper function to recalculate price without re-running entire app logic
 def quick_dcf_calc(w, t_g):
-    # Use final projected values from the main loop
-    tv = fcf5_final * (1 + t_g) / (w - t_g)
-    pv_tv = tv * ((1 + w)**-5)
+    # This is a simplified version for the sensitivity table
+    # It assumes the base Year 0 inputs haven't been manually edited in the table
+    # For speed, we re-calculate using the drivers
     
-    # We must discount the stream again with new WACC
-    # (Approximation: reusing fcf_stream would be wrong because PV factors change with WACC)
-    # Re-discounting the raw FCFFs we calculated in the main loop:
-    # We need to recover the raw FCFFs first.
-    # Logic: PV = FCFF / (1+old_w)^y  -> FCFF = PV * (1+old_w)^y
-    # This is slightly complex to reverse engineer perfectly without storing raw FCFFs.
-    # Better approach: We stored fcf5_final, but we need the previous years.
-    # To keep this fast/clean for the table, we will use the "Perpetuity Price" 
-    # and just adjust the Terminal Value part, assuming the explicit period (5y) PV 
-    # doesn't change *drastically* enough to break the heatmap trend for small WACC changes.
-    # However, for accuracy, let's re-discount properly.
+    # Recalc PV of FCFF
+    cap_r = c_in/r_in if r_in else 0
+    dep_r = d_in/r_in if r_in else 0
+    nwc_r = 0.02
     
-    # Re-calculate PV of the explicit period with new WACC
-    new_sum_pv = 0
-    # We can infer raw FCFF from the dataframe
+    fcf_pv_sum = 0.0
+    prev_rev = r_in
+    last_fcf = 0.0
+    last_ebitda = 0.0
+    
     for y in range(1, 6):
-        col = f"Year {y}"
-        # We need raw FCFF. 
-        # Since we didn't store raw FCFF in the df (only PV is sometimes shown in other versions), 
-        # we re-calculate it quickly.
-        rev = clean_currency(edited_df.loc['Revenue', col], curr_symbol)
-        ebit = clean_currency(edited_df.loc['EBIT', col], curr_symbol)
-        da = clean_currency(edited_df.loc['D&A', col], curr_symbol)
-        cap = clean_currency(edited_df.loc['Capex', col], curr_symbol)
-        # NWC
-        prev = f"Year {y-1}"
-        r_prev = clean_currency(edited_df.loc['Revenue', prev], curr_symbol)
-        dnwc = (rev - r_prev) * 0.02
+        rev = prev_rev * (1 + g_rev)
+        ebit = rev * margin_tgt
+        nopat = ebit * (1 - tax_rate)
+        da = rev * dep_r
+        capex = rev * cap_r
+        dnwc = (rev - prev_rev) * nwc_r
         
-        fcff = (ebit * (1 - tax_rate)) + da - cap - dnwc
-        new_sum_pv += fcff * ((1 + w)**-y)
-        
-    ev = new_sum_pv + pv_tv
-    eq = ev - (debt_in - cash_in)
-    return eq / shares_in
+        fcff = nopat + da - capex - dnwc
+        pv = fcff * ((1 + w)**-y)
+        fcf_pv_sum += pv
+        prev_rev = rev
+        if y == 5:
+            last_fcf = fcff
+            last_ebitda = ebit + da # Approx EBITDA
+
+    tv_g = last_fcf * (1 + t_g) / (w - t_g)
+    pv_tv_g = tv_g * ((1 + w)**-5)
+    
+    tv_e = last_ebitda * exit_mult
+    pv_tv_e = tv_e * ((1 + w)**-5)
+    
+    eq_g = (fcf_pv_sum + pv_tv_g) - (debt_in - cash_in)
+    eq_e = (fcf_pv_sum + pv_tv_e) - (debt_in - cash_in)
+    
+    # Average the two methods
+    price_g = eq_g / shares_in if shares_in > 0 else 0
+    price_e = eq_e / shares_in if shares_in > 0 else 0
+    
+    return (price_g + price_e) / 2
 
 wacc_range = [wacc - 0.01, wacc - 0.005, wacc, wacc + 0.005, wacc + 0.01]
 ltg_range = [ltg - 0.005, ltg - 0.0025, ltg, ltg + 0.0025, ltg + 0.005]
@@ -487,7 +500,6 @@ sens_data = {}
 for t_g in ltg_range:
     col_data = []
     for w_r in wacc_range:
-        # Check safety
         if w_r <= t_g: val = 0.0
         else: val = quick_dcf_calc(w_r, t_g)
         col_data.append(val)
