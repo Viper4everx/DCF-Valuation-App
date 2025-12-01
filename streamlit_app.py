@@ -15,12 +15,12 @@ st.markdown("""
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
 body { font-family: 'Inter', sans-serif; background: linear-gradient(135deg, #1e1e2f 0%, #2a2a3e 100%); color: #f0f2f6; }
 
-/* Cards & Containers */
+/* Cards */
 .glass-card { background: rgba(255,255,255,0.05); border-radius: 12px; padding: 20px; border: 1px solid rgba(255,255,255,0.1); margin-bottom: 20px; }
 .val-card { background: rgba(255,255,255,0.03); border-radius: 12px; padding: 24px; border: 1px solid rgba(255,255,255,0.08); height: 100%; transition: transform 0.2s; }
 .val-card:hover { transform: translateY(-3px); }
 
-/* Typography & Accents */
+/* Typography */
 .val-label { font-size: 11px; font-weight: 700; opacity: 0.5; letter-spacing: 1px; text-transform: uppercase; }
 .val-price { font-size: 42px; font-weight: 700; margin: 4px 0 16px 0; color: #fff; }
 .val-title { font-size: 18px; font-weight: 600; margin-bottom: 4px; color: #fff; }
@@ -33,7 +33,9 @@ body { font-family: 'Inter', sans-serif; background: linear-gradient(135deg, #1e
 .border-purple { border-left: 5px solid #8b5cf6; }
 .border-green { border-left: 5px solid #10b981; }
 
+/* Overrides */
 div[data-testid="stExpander"] { background-color: rgba(255,255,255,0.02); border-radius: 12px; }
+div[data-testid="stButton"] button { min-width: 100px !important; }
 th { text-align: center !important; }
 </style>
 """, unsafe_allow_html=True)
@@ -48,14 +50,12 @@ def create_pdf(ticker, date, price, int_val, upside, wacc, ltg, exit_m, c_curr):
     c = canvas.Canvas(buffer, pagesize=letter)
     width, height = letter
 
-    # Header
     c.setFont("Helvetica-Bold", 24)
     c.drawString(50, height - 50, f"Valuation Report: {ticker}")
     c.setFont("Helvetica", 12)
     c.drawString(50, height - 80, f"Date: {date}")
     c.line(50, height - 100, width - 50, height - 100)
 
-    # Results
     c.setFont("Helvetica-Bold", 18)
     c.drawString(50, height - 140, "Valuation Results")
     c.setFont("Helvetica", 14)
@@ -65,7 +65,6 @@ def create_pdf(ticker, date, price, int_val, upside, wacc, ltg, exit_m, c_curr):
     status = "UNDERVALUED" if upside >= 0 else "OVERVALUED"
     c.drawString(50, height - 210, f"Upside: {upside:+.1%} ({status})")
 
-    # Assumptions
     c.setFont("Helvetica-Bold", 18)
     c.drawString(50, height - 260, "Key Assumptions")
     c.setFont("Helvetica", 12)
@@ -79,12 +78,15 @@ def create_pdf(ticker, date, price, int_val, upside, wacc, ltg, exit_m, c_curr):
     return buffer
 
 # ==========================================
-# 3. HELPER FUNCTIONS
+# 3. HELPER FUNCTIONS (FORMATTING)
 # ==========================================
 def fmt_comma(val):
+    """Formats 130497 -> '130,497.00' for Text Inputs"""
+    if pd.isna(val): return "0.00"
     return f"{val:,.2f}"
 
 def clean_currency(val, symbol="$"):
+    """Cleans '130,497.00' -> 130497.0 for Math"""
     if isinstance(val, (int, float)): return float(val)
     if pd.isna(val) or val == "": return 0.0
     clean = str(val).replace(',', '').replace(symbol, '').replace('€', '').replace('£', '').replace('¥', '').strip()
@@ -99,29 +101,22 @@ def get_yahoo_data(ticker):
     try:
         tk = yf.Ticker(ticker)
         
-        try:
-            info = tk.info
-            if info is None: info = {}
-        except: info = {}
-
-        # 1. Market Data
         try: price = tk.fast_info.last_price
         except: 
             hist = tk.history(period="1d")
             price = hist['Close'].iloc[-1] if not hist.empty else 0.0
 
-        shares = info.get('sharesOutstanding')
+        try: shares = tk.info.get('sharesOutstanding')
+        except: shares = None
         if not shares: 
             try: shares = tk.fast_info.shares_outstanding
             except: pass
         if not shares: shares = 1e9
         shares = shares / 1e6 # Millions
 
-        industry = info.get('industry', 'Unknown')
-        
-        # 2. Currency Logic
-        price_curr = info.get('currency', 'USD')
-        fin_curr = info.get('financialCurrency', price_curr)
+        industry = tk.info.get('industry', 'Unknown')
+        price_curr = tk.info.get('currency', 'USD')
+        fin_curr = tk.info.get('financialCurrency', price_curr)
         
         fx_rate = 1.0
         fx_msg = ""
@@ -137,7 +132,6 @@ def get_yahoo_data(ticker):
             except:
                 fx_msg = f"⚠️ FX Error: Could not fetch rate for {pair}."
 
-        # 3. Financial Statements
         inc = tk.income_stmt
         bs = tk.balance_sheet
         cf = tk.cashflow
@@ -151,7 +145,7 @@ def get_yahoo_data(ticker):
             return 0.0
 
         data = {}
-        factor = fx_rate / 1e6 # Convert to Millions
+        factor = fx_rate / 1e6 # Millions
         
         data['Revenue'] = get_val(inc, ['Total Revenue', 'Total Net Sales']) * factor
         data['EBIT']    = get_val(inc, ['Operating Income', 'EBIT']) * factor
@@ -216,11 +210,13 @@ if ticker:
     if st.session_state.get('fx_msg'):
         st.info(f"💱 {st.session_state.fx_msg}")
 
-# YEAR 0 FORM
+# YEAR 0 FORM (NOW USING TEXT INPUTS FOR COMMAS)
 st.markdown("### Year 0: Base Financials (Millions)")
 with st.expander("Expand to edit Year 0 Data", expanded=True):
     with st.form("y0_form"):
         c1, c2, c3, c4 = st.columns(4)
+        
+        # Using TEXT input to allow "130,497.00" format
         r_in_str = c1.text_input("Revenue", value=fmt_comma(st.session_state.y0['Revenue']))
         e_in_str = c2.text_input("EBIT", value=fmt_comma(st.session_state.y0['EBIT']))
         d_in_str = c3.text_input("D&A", value=fmt_comma(st.session_state.y0['Depreciation']))
@@ -231,6 +227,7 @@ with st.expander("Expand to edit Year 0 Data", expanded=True):
         cash_in_str = c6.text_input("Total Cash", value=fmt_comma(st.session_state.y0['Cash']))
         shares_in_str = c7.text_input("Shares (Millions)", value=fmt_comma(shares_def))
         
+        # Clean back to numbers for calculations
         r_in = clean_currency(r_in_str, curr_symbol)
         e_in = clean_currency(e_in_str, curr_symbol)
         d_in = clean_currency(d_in_str, curr_symbol)
@@ -243,7 +240,7 @@ with st.expander("Expand to edit Year 0 Data", expanded=True):
         st.form_submit_button("Update Model")
 
 # ==========================================
-# 6. SCENARIO & DRIVERS (SIDEBAR)
+# 6. SCENARIO & DRIVERS
 # ==========================================
 with st.sidebar:
     st.header("Configuration")
@@ -328,16 +325,14 @@ disabled_cols = display_cols if not is_unlocked else ["Year 0"]
 
 df_display = df_base.T
 df_display.columns = display_cols
+# Format as strings with commas for display
 df_formatted = df_display.applymap(lambda x: f"{x:,.2f}")
 
 edited_df = st.data_editor(
     df_formatted,
     use_container_width=True,
     disabled=disabled_cols,
-    key=f"editor_{st.session_state.reset_key}",
-    column_config={
-        col: st.column_config.NumberColumn(format=f"{curr_symbol} %,.2f") for col in display_cols
-    }
+    key=f"editor_{st.session_state.reset_key}"
 )
 
 # ==========================================
@@ -421,21 +416,15 @@ def make_bridge(pv_fcf, pv_tv, ev, debt, cash, eq):
         "Value": [pv_fcf, pv_tv, ev, debt-cash, eq]
     }).set_index("Component")
 
-# Bridges formatted in Millions
 bridge_format = f"{curr_symbol}{{:,.2f}}M"
-
-# Add spacer to push content down slightly as requested
-st.markdown('<div style="height: 20px;"></div>', unsafe_allow_html=True)
 
 with c_g:
     st.markdown(f"""<div class="val-card border-purple"><div class="val-title">Perpetuity Growth 🌊</div><div class="val-sub">Based on {safe_ltg:.1%} long-term growth</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-purple">{curr_symbol}{p_g:,.2f}</div><div class="val-ev"><span>Enterprise Value</span><strong>{curr_symbol}{ev_g:,.2f}M</strong></div></div>""", unsafe_allow_html=True)
-    st.markdown('<div style="height: 20px;"></div>', unsafe_allow_html=True) # Spacer
     st.markdown("##### Bridge (Gordon) - Millions")
     st.dataframe(make_bridge(sum_pv_final, pv_tv_g, ev_g, debt_in, cash_in, ev_g-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
 
 with c_e:
     st.markdown(f"""<div class="val-card border-green"><div class="val-title">Exit Multiple 💼</div><div class="val-sub">Based on {exit_mult}x EBITDA multiple</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-green">{curr_symbol}{p_e:,.2f}</div><div class="val-ev"><span>Enterprise Value</span><strong>{curr_symbol}{ev_e:,.2f}M</strong></div></div>""", unsafe_allow_html=True)
-    st.markdown('<div style="height: 20px;"></div>', unsafe_allow_html=True) # Spacer
     st.markdown("##### Bridge (Multiple) - Millions")
     st.dataframe(make_bridge(sum_pv_final, pv_tv_e, ev_e, debt_in, cash_in, ev_e-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
 
@@ -446,13 +435,8 @@ st.markdown("<br><hr><br>", unsafe_allow_html=True)
 st.subheader("Sensitivity Analysis 🎯")
 st.caption("Implied Share Price based on WACC vs. Terminal Growth Rate")
 
-# Helper function to recalculate price without re-running entire app logic
+# Simplified Re-Calc for Speed
 def quick_dcf_calc(w, t_g):
-    # This is a simplified version for the sensitivity table
-    # It assumes the base Year 0 inputs haven't been manually edited in the table
-    # For speed, we re-calculate using the drivers
-    
-    # Recalc PV of FCFF
     cap_r = c_in/r_in if r_in else 0
     dep_r = d_in/r_in if r_in else 0
     nwc_r = 0.02
@@ -476,7 +460,7 @@ def quick_dcf_calc(w, t_g):
         prev_rev = rev
         if y == 5:
             last_fcf = fcff
-            last_ebitda = ebit + da # Approx EBITDA
+            last_ebitda = ebit + da 
 
     tv_g = last_fcf * (1 + t_g) / (w - t_g)
     pv_tv_g = tv_g * ((1 + w)**-5)
@@ -487,7 +471,6 @@ def quick_dcf_calc(w, t_g):
     eq_g = (fcf_pv_sum + pv_tv_g) - (debt_in - cash_in)
     eq_e = (fcf_pv_sum + pv_tv_e) - (debt_in - cash_in)
     
-    # Average the two methods
     price_g = eq_g / shares_in if shares_in > 0 else 0
     price_e = eq_e / shares_in if shares_in > 0 else 0
     
