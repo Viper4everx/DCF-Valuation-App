@@ -250,17 +250,17 @@ with st.sidebar:
     scenario = st.selectbox("Scenario Mode", ["Base Case", "Bull Case 🚀", "Bear Case 🐻"])
     
     if "Bull" in scenario:
-        mult_g, mult_m, mult_e = 1.2, 1.1, 1.15
-        st.success("Growth +20%, Margin +10%")
+        mult_g, mult_m, mult_e = 1.10, 1.05, 1.10
+        st.success("Growth +10%, Margin +5%")
     elif "Bear" in scenario:
-        mult_g, mult_m, mult_e = 0.7, 0.8, 0.8
-        st.warning("Growth -30%, Margin -20%")
+        mult_g, mult_m, mult_e = 0.90, 0.95, 0.90
+        st.warning("Growth -10%, Margin -5%")
     else:
         mult_g, mult_m, mult_e = 1.0, 1.0, 1.0
 
     st.divider()
     st.header("Assumptions")
-    wacc = st.number_input("WACC %", value=9.0, step=0.1, format="%.1f", key=f"w_{ticker}") / 100
+    wacc = st.number_input("WACC %", value=9.0, step=0.1, format="%.1f", key=f"w_{ticker}_{scenario}") / 100
     
     st.divider()
     st.subheader("Drivers")
@@ -271,12 +271,12 @@ with st.sidebar:
     elif current_margin < 0.10: def_growth, def_mult = 3.0, 8.0
     else: def_growth, def_mult = 5.0, 12.0
     
-    g_rev = st.number_input("Revenue Growth %", value=def_growth * mult_g, step=0.5, format="%.1f", key=f"g_{ticker}") / 100
+    g_rev = st.number_input("Revenue Growth %", value=def_growth * mult_g, step=0.5, format="%.1f", key=f"g_{ticker}_{scenario}") / 100
     m_def = (current_margin * 100)
-    margin_tgt = st.number_input("EBIT Margin %", value=float(f"{m_def * mult_m:.1f}"), step=0.5, format="%.1f", key=f"m_{ticker}") / 100
-    tax_rate = st.number_input("Tax Rate %", value=21.0, step=1.0, format="%.1f", key=f"t_{ticker}") / 100
-    ltg = st.number_input("Terminal Growth %", value=2.5, step=0.1, format="%.1f", key=f"l_{ticker}") / 100
-    exit_mult = st.number_input("Exit Multiple (x)", value=def_mult * mult_e, step=0.5, format="%.1f", key=f"e_{ticker}")
+    margin_tgt = st.number_input("EBIT Margin %", value=float(f"{m_def * mult_m:.1f}"), step=0.5, format="%.1f", key=f"m_{ticker}_{scenario}") / 100
+    tax_rate = st.number_input("Tax Rate %", value=21.0, step=1.0, format="%.1f", key=f"t_{ticker}_{scenario}") / 100
+    ltg = st.number_input("Terminal Growth %", value=2.5, step=0.1, format="%.1f", key=f"l_{ticker}_{scenario}") / 100
+    exit_mult = st.number_input("Exit Multiple (x)", value=def_mult * mult_e, step=0.5, format="%.1f", key=f"e_{ticker}_{scenario}")
 
 # ==========================================
 # 7. CALCULATION ENGINE
@@ -423,11 +423,15 @@ bridge_format = f"{curr_symbol}{{:,.2f}}M"
 
 with c_g:
     st.markdown(f"""<div class="val-card border-purple"><div class="val-title">Perpetuity Growth 🌊</div><div class="val-sub">Based on {safe_ltg:.1%} long-term growth</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-purple">{curr_symbol}{p_g:,.2f}</div><div class="val-ev"><span>Enterprise Value</span><strong>{curr_symbol}{ev_g:,.2f}M</strong></div></div>""", unsafe_allow_html=True)
+    # ADDED SPACE HERE
+    st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("##### Bridge (Gordon) - Millions")
     st.dataframe(make_bridge(sum_pv_final, pv_tv_g, ev_g, debt_in, cash_in, ev_g-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
 
 with c_e:
     st.markdown(f"""<div class="val-card border-green"><div class="val-title">Exit Multiple 💼</div><div class="val-sub">Based on {exit_mult}x EBITDA multiple</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-green">{curr_symbol}{p_e:,.2f}</div><div class="val-ev"><span>Enterprise Value</span><strong>{curr_symbol}{ev_e:,.2f}M</strong></div></div>""", unsafe_allow_html=True)
+    # ADDED SPACE HERE
+    st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("##### Bridge (Multiple) - Millions")
     st.dataframe(make_bridge(sum_pv_final, pv_tv_e, ev_e, debt_in, cash_in, ev_e-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
 
