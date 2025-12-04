@@ -123,6 +123,9 @@ def get_yahoo_data(ticker):
         price_curr = info.get('currency', 'USD')
         fin_curr = info.get('financialCurrency', price_curr)
         
+        # FIX: Fetch actual EV/EBITDA from market data
+        actual_ev_ebitda = info.get('enterpriseToEbitda')
+        
         fx_rate = 1.0
         fx_msg = ""
         
@@ -161,10 +164,10 @@ def get_yahoo_data(ticker):
         data['Debt'] = get_val(bs, ['Total Debt', 'Long Term Debt']) * factor
         data['Cash'] = get_val(bs, ['Cash And Cash Equivalents']) * factor
         
-        return data, price, shares, fx_msg, price_curr, industry
+        return data, price, shares, fx_msg, price_curr, industry, actual_ev_ebitda
         
     except Exception as e:
-        return None, 0.0, 1.0, str(e), "USD", "Unknown"
+        return None, 0.0, 1.0, str(e), "USD", "Unknown", None
 
 # ==========================================
 # 5. UI: INPUTS & SETUP
@@ -188,7 +191,8 @@ industry_name = "Unknown"
 if ticker:
     with st.spinner(f"Analysing {ticker}..."):
         if 'last_ticker' not in st.session_state or st.session_state.last_ticker != ticker:
-            d, cur_price, shares_def, fx_msg, currency, ind_name = get_yahoo_data(ticker)
+            # Updated Unpacking
+            d, cur_price, shares_def, fx_msg, currency, ind_name, ev_ebitda = get_yahoo_data(ticker)
             if d:
                 st.session_state.y0 = d
                 st.session_state.last_price = cur_price
@@ -197,6 +201,7 @@ if ticker:
                 st.session_state.fx_msg = fx_msg
                 st.session_state.currency = currency
                 st.session_state.industry = ind_name
+                st.session_state.ev_ebitda_actual = ev_ebitda
                 st.session_state.reset_key += 1
             else:
                 st.error(f"Error: {fx_msg}")
@@ -204,6 +209,7 @@ if ticker:
                 st.session_state.fx_msg = ""
                 st.session_state.currency = "USD"
                 st.session_state.industry = "Unknown"
+                st.session_state.ev_ebitda_actual = None
         else:
             cur_price = st.session_state.last_price
             shares_def = st.session_state.last_shares
@@ -265,10 +271,25 @@ with st.sidebar:
     st.subheader("Drivers")
     
     current_margin = (e_in / r_in) if r_in > 0 else 0.0
-    if current_margin > 0.30: def_growth, def_mult = 15.0, 25.0
-    elif current_margin < 0.10: def_growth, def_mult = 3.0, 8.0
-    else: def_growth, def_mult = 5.0, 12.0
     
+    # === FIX: BETTER DEFAULT MULTIPLE LOGIC ===
+    # Priority 1: Use actual EV/EBITDA from Yahoo
+    real_ev_ebitda = st.session_state.get('ev_ebitda_actual')
+    
+    if real_ev_ebitda and real_ev_ebitda > 0:
+        def_mult = real_ev_ebitda
+        st.caption(f"Used Market Multiple: {def_mult:.1f}x")
+    else:
+        # Priority 2: Fallback to Margin Logic (but capped for safety)
+        if current_margin > 0.30: def_mult = 18.0 # Lowered from 25 to be safer
+        elif current_margin < 0.10: def_mult = 8.0
+        else: def_mult = 12.0
+    
+    # Growth Logic
+    if current_margin > 0.30: def_growth = 15.0
+    elif current_margin < 0.10: def_growth = 3.0
+    else: def_growth = 5.0
+
     g_rev = st.number_input("Revenue Growth %", value=def_growth * mult_g, step=0.5, format="%.1f", key=f"g_{ticker}_{scenario}") / 100
     m_def = (current_margin * 100)
     margin_tgt = st.number_input("EBIT Margin %", value=float(f"{m_def * mult_m:.1f}"), step=0.5, format="%.1f", key=f"m_{ticker}_{scenario}") / 100
