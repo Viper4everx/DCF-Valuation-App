@@ -107,12 +107,13 @@ def get_yahoo_data(ticker):
         except: info = {}
         if info is None: info = {}
 
+        # 1. Market Data
         try: price = tk.fast_info.last_price
         except: 
             hist = tk.history(period="1d")
             price = hist['Close'].iloc[-1] if not hist.empty else 0.0
 
-        # === SHARE COUNT LOGIC ===
+        # === FIX: ROBUST SHARE COUNT LOGIC ===
         shares = info.get('sharesOutstanding')
         if not shares:
             try: shares = tk.fast_info.shares_outstanding
@@ -256,7 +257,6 @@ else:
     shares_def = 1.0
     cur_price = 0.0
 
-# FIX: Added Date Display to Header
 date_display = st.session_state.get('file_date', 'Unknown')
 st.markdown(f"### Year 0: Base Financials (Ended {date_display})")
 
@@ -514,9 +514,13 @@ if cur_price > 0 and r_in > 0:
     mos_conservative = (min_val - cur_price) / cur_price
     mos_aggressive = (max_val - cur_price) / cur_price
     
+    # === NEW: SMARTER RATING LOGIC ===
     if mos_conservative > 0:
         main_color = "status-under"
         rating_txt = "STRONG BUY (Safe)"
+    elif mos_pct > 0.20: # If Average Upside > 20%
+        main_color = "status-under"
+        rating_txt = "STRONG BUY (High Upside)"
     elif mos_pct > 0:
         main_color = "text-orange"
         rating_txt = "MODERATE BUY"
