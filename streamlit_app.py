@@ -390,6 +390,20 @@ with st.sidebar:
     
     term_cap_ratio = st.slider("Terminal Capex / D&A", 0.5, 1.5, 1.0, 0.1, help="1.0 means Capex matches Depreciation")
 
+    # === GLOBAL RATIOS (The Fix: Calculated here, used everywhere) ===
+    # Ratios to project future years
+    cap_r = c_in/r_in if r_in > 0 else 0
+    dep_r = d_in/r_in if r_in > 0 else 0
+    
+    # NWC Ratio
+    real_nwc = st.session_state.y0.get('ChangeInWC', 0)
+    nwc_r = (real_nwc / r_in) if r_in > 0 else 0.0
+    if nwc_r > 0.05: nwc_r = 0.05
+    if nwc_r < -0.05: nwc_r = -0.05
+    
+    # SBC Ratio
+    sbc_r = (sbc_in / r_in) if r_in > 0 else 0.0
+
 # ==========================================
 # 7. CALCULATION ENGINE (SMART DECAY)
 # ==========================================
@@ -400,18 +414,9 @@ safe_ltg = ltg if ltg < (wacc - 0.015) else (wacc - 0.015)
 
 if r_in > 0:
     nopat0 = e_in * (1 - tax_rate)
-    
-    real_nwc = st.session_state.y0.get('ChangeInWC', 0)
     fcff0 = nopat0 + d_in - c_in + real_nwc + sbc_in 
     
     base_data.append({'Year': 0, 'Revenue': r_in, 'EBIT': e_in, 'NOPAT': nopat0, 'D&A': d_in, 'Capex': c_in, 'FCFF': fcff0, 'PV': 0.0})
-
-    cap_r, dep_r = c_in/r_in, d_in/r_in
-    nwc_r = (real_nwc / r_in) if r_in != 0 else 0.0
-    if nwc_r > 0.05: nwc_r = 0.05
-    if nwc_r < -0.05: nwc_r = -0.05
-    
-    sbc_r = (sbc_in / r_in) if r_in != 0 else 0.0
 
     prev_rev = r_in
 
@@ -427,7 +432,10 @@ if r_in > 0:
         rev = prev_rev * (1 + current_g)
         ebit = rev * margin_tgt
         nopat = ebit * (1 - tax_rate)
-        da, capex = rev * dep_r, rev * cap_r
+        
+        # Use Global Ratios
+        da = rev * dep_r
+        capex = rev * cap_r
         dnwc = (rev - prev_rev) * nwc_r
         sbc_proj = rev * sbc_r
         
@@ -485,12 +493,17 @@ try:
         
         prev_col = f"Year {y-1}"
         rev_prev = clean_currency(edited_df.loc['Revenue', prev_col], curr_symbol)
+        
+        # Use Global Ratios for NWC/SBC if table is not edited for them specifically
+        # (Table only shows Rev, EBIT, DA, Capex - NWC/SBC are derived from Revenue)
         dnwc = (rev_edit - rev_prev) * nwc_r
         sbc_proj = rev_edit * sbc_r
         
         nopat = ebit_edit * (1 - tax_rate)
+        # Recalc FCF
         fcff_recalc = nopat + da_edit - capex_edit - dnwc + sbc_proj
         
+        # Mid-year discount
         pv_recalc = fcff_recalc * ((1 + wacc)**-(y - 0.5))
         fcf_stream.append(pv_recalc)
         
@@ -501,18 +514,24 @@ try:
 
     sum_pv_final = sum(fcf_stream)
     
-    term_nopat = ebitda5_final * (1 - tax_rate)
+    # 1. Gordon Growth TV (Standard)
+    # FIX 3: Terminal Capex Ratio Slider used here
+    # Terminal FCF = NOPAT + D&A - (D&A * Ratio) - NWC
+    term_nopat = ebitda5_final * (1 - tax_rate) # Simplified NOPAT proxy
     term_capex = da5_final * term_cap_ratio
+    # Assuming 0 NWC change in perpetuity for simplicity, or keep small growth
     fcf5_normalized = (ebitda5_final - da5_final)*(1-tax_rate) + da5_final - term_capex
     
     tv_g = fcf5_normalized * (1+safe_ltg)/(wacc-safe_ltg)
     pv_tv_g = tv_g * ((1+wacc)**-5)
     
+    # 2. Conservative TV 
     wacc_cons = wacc + 0.01
     safe_ltg_cons = safe_ltg if safe_ltg < (wacc_cons - 0.015) else (wacc_cons - 0.015)
     tv_c = fcf5_normalized * (1+safe_ltg_cons)/(wacc_cons-safe_ltg_cons)
     pv_tv_c = tv_c * ((1+wacc)**-5)
     
+    # 3. Exit Multiple TV
     tv_e = ebitda5_final * exit_mult
     pv_tv_e = tv_e * ((1+wacc)**-5)
 
@@ -634,12 +653,9 @@ with c_sens:
     st.caption("Implied Share Price based on WACC vs. Terminal Growth")
 
     def quick_dcf_calc(w, t_g):
-        cap_r = c_in/r_in if r_in else 0
-        dep_r = d_in/r_in if r_in else 0
-        nwc_r = (st.session_state.y0.get('ChangeInWC',0) / r_in) if r_in else 0
-        if nwc_r > 0.05: nwc_r = 0.05
-        if nwc_r < -0.05: nwc_r = -0.05
-        sbc_r = (st.session_state.y0.get('SBC',0) / r_in) if r_in else 0
+        # Use Global Ratios from Sidebar
+        # sbc_r and nwc_r are defined in sidebar, check scope
+        # NOTE: sensitivity uses the same globals defined in sidebar
         
         fcf_pv_sum = 0.0
         prev_rev = r_in
@@ -764,16 +780,15 @@ with c_mc:
                     ebit_sim = rev_sim * m_sim
                     nopat_sim = ebit_sim * (1 - tax_rate)
                     
-                    da_ratio = (d_in / r_in) if r_in > 0 else 0
-                    cap_ratio = (c_in / r_in) if r_in > 0 else 0
-                    
-                    da_sim = rev_sim * da_ratio
-                    capex_sim = rev_sim * cap_ratio
+                    # Use Global Ratios
+                    da_sim = rev_sim * dep_r
+                    capex_sim = rev_sim * cap_r
                     dnwc_sim = (rev_sim - prev_rev_sim) * nwc_r
                     sbc_sim = rev_sim * sbc_r
                     
                     fcff_sim = nopat_sim + da_sim - capex_sim - dnwc_sim + sbc_sim
                     
+                    # Mid-year discount
                     pv_sim = fcff_sim * ((1 + w_sim)**-(y-0.5))
                     pv_sum += pv_sim
                     prev_rev_sim = rev_sim
@@ -784,6 +799,7 @@ with c_mc:
                         da5_sim = da_sim
                 
                 # Terminal Values
+                # Normalize Capex using slider ratio
                 term_capex_sim = da5_sim * term_cap_ratio
                 fcf5_norm_sim = (ebitda5_sim - da5_sim)*(1-tax_rate) + da5_sim - term_capex_sim
                 
@@ -809,6 +825,7 @@ with c_mc:
                 avg_share_price = (share_g + share_c + share_e) / 3
                 sim_results.append(avg_share_price)
             
+            # FIXED CHART: Use clean Numpy Bins
             sim_df = pd.DataFrame(sim_results, columns=["Price"])
             sim_df = sim_df[(sim_df['Price'] > 0) & (sim_df['Price'] < cur_price * 4)]
             
