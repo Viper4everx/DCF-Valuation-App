@@ -2,8 +2,6 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 import numpy as np
-import requests
-import time
 from io import BytesIO
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
@@ -98,20 +96,14 @@ def clean_currency(val, symbol="$"):
     except: return 0.0
 
 # ==========================================
-# 4. DATA ENGINE (ROBUST / NO FAKE DATA)
+# 4. DATA ENGINE (CLEAN - NO MANUAL SESSION)
 # ==========================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_yahoo_data(ticker):
-    # FIX: Use a Session with Browser Headers to avoid Rate Limiting
-    session = requests.Session()
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    })
-
     try:
-        tk = yf.Ticker(ticker, session=session)
+        # Reverted to simple call as requested by error message
+        tk = yf.Ticker(ticker)
         
-        # Try fetching info. If rate limited, this will fail.
         try: info = tk.info
         except: info = {}
         if info is None: info = {}
@@ -138,7 +130,7 @@ def get_yahoo_data(ticker):
         
         # FIX: Fetch 10-Year Treasury Yield for WACC
         try:
-            tnx = yf.Ticker("^TNX", session=session)
+            tnx = yf.Ticker("^TNX")
             rf_rate = tnx.fast_info.last_price
             if not rf_rate: rf_rate = 4.0
         except:
@@ -150,7 +142,7 @@ def get_yahoo_data(ticker):
         if price_curr != fin_curr:
             pair = f"{fin_curr}{price_curr}=X"
             try:
-                fx = yf.Ticker(pair, session=session)
+                fx = yf.Ticker(pair)
                 rate = fx.fast_info.last_price
                 if rate:
                     fx_rate = rate
@@ -162,7 +154,6 @@ def get_yahoo_data(ticker):
         bs = tk.balance_sheet
         cf = tk.cashflow
         
-        # CRITICAL CHECK: If Yahoo returns empty data, do NOT use mock data. Raise error.
         if inc.empty: raise ValueError("Yahoo Finance returned no data. You may be rate-limited.")
 
         def get_val(df, keys):
@@ -191,7 +182,6 @@ def get_yahoo_data(ticker):
         return data, price, shares, fx_msg, price_curr, industry, actual_ev_ebitda
         
     except Exception as e:
-        # If rate limited, return clear error (NO FAKE DATA)
         return None, 0.0, 1.0, f"Connection Error: {str(e)}", "USD", "Unknown", None
 
 # ==========================================
