@@ -425,40 +425,38 @@ if cur_price > 0 and r_in > 0:
         main_color = "status-over" # Red
         rating_txt = "OVERVALUED"
 
-    st.markdown(f"""
-    <div class="glass-card">
-        <div style="display:flex; justify-content: space-around; align-items: center; margin-bottom: 15px;">
-            <div style="text-align:center;">
-                <div class="val-label">CURRENT PRICE</div>
-                <div class="val-price">{curr_symbol}{cur_price:,.2f}</div>
-            </div>
-            
-            <div style="text-align:center;">
-                <div class="val-label">INTRINSIC RANGE</div>
-                <div class="val-price text-blue" style="font-size: 32px; margin-bottom: 5px;">
-                    {curr_symbol}{min_val:,.0f} - {curr_symbol}{max_val:,.0f}
-                </div>
-                <div style="font-size: 12px; opacity: 0.8;">Average: {curr_symbol}{avg_int:,.2f}</div>
-            </div>
-            
-            <div style="text-align:center;">
-                <div class="val-label">RATING</div>
-                <div class="val-price {main_color}" style="font-size: 32px;">{rating_txt}</div>
-                <div style="{main_color}">Avg Upside: {mos_pct:+.1%}</div>
-            </div>
-        </div>
-        
-        <div style="background: rgba(255,255,255,0.1); height: 8px; border-radius: 4px; position: relative; margin: 0 20px;">
-            <div style="position: absolute; left: 10%; right: 10%; top: 0; bottom: 0; background: #60a5fa; opacity: 0.3; border-radius: 4px;"></div>
-            
-            <div style="position: absolute; left: 10%; top: 12px; font-size: 10px; color: #60a5fa;">Low<br>{mos_conservative:+.0%}</div>
-            <div style="position: absolute; right: 10%; top: 12px; font-size: 10px; text-align: right; color: #60a5fa;">High<br>{mos_aggressive:+.0%}</div>
-        </div>
-        <div style="text-align: center; font-size: 11px; margin-top: 25px; opacity: 0.6;">
-            Conservative Upside: <strong>{mos_conservative:+.1%}</strong> &nbsp; | &nbsp; Aggressive Upside: <strong>{mos_aggressive:+.1%}</strong>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+    # NOTE: The string below is flush-left to prevent Markdown from thinking it's a code block
+    html_code = f"""
+<div class="glass-card">
+<div style="display:flex; justify-content: space-around; align-items: center; margin-bottom: 15px;">
+<div style="text-align:center;">
+<div class="val-label">CURRENT PRICE</div>
+<div class="val-price">{curr_symbol}{cur_price:,.2f}</div>
+</div>
+<div style="text-align:center;">
+<div class="val-label">INTRINSIC RANGE</div>
+<div class="val-price text-blue" style="font-size: 32px; margin-bottom: 5px;">
+{curr_symbol}{min_val:,.0f} - {curr_symbol}{max_val:,.0f}
+</div>
+<div style="font-size: 12px; opacity: 0.8;">Average: {curr_symbol}{avg_int:,.2f}</div>
+</div>
+<div style="text-align:center;">
+<div class="val-label">RATING</div>
+<div class="val-price {main_color}" style="font-size: 32px;">{rating_txt}</div>
+<div style="{main_color}">Avg Upside: {mos_pct:+.1%}</div>
+</div>
+</div>
+<div style="background: rgba(255,255,255,0.1); height: 8px; border-radius: 4px; position: relative; margin: 0 20px;">
+<div style="position: absolute; left: 10%; right: 10%; top: 0; bottom: 0; background: #60a5fa; opacity: 0.3; border-radius: 4px;"></div>
+<div style="position: absolute; left: 10%; top: 12px; font-size: 10px; color: #60a5fa;">Low<br>{mos_conservative:+.0%}</div>
+<div style="position: absolute; right: 10%; top: 12px; font-size: 10px; text-align: right; color: #60a5fa;">High<br>{mos_aggressive:+.0%}</div>
+</div>
+<div style="text-align: center; font-size: 11px; margin-top: 25px; opacity: 0.6;">
+Conservative Upside: <strong>{mos_conservative:+.1%}</strong> &nbsp; | &nbsp; Aggressive Upside: <strong>{mos_aggressive:+.1%}</strong>
+</div>
+</div>
+"""
+    st.markdown(html_code, unsafe_allow_html=True)
 
     pdf_bytes = create_pdf(ticker, pd.Timestamp.now().strftime('%Y-%m-%d'), cur_price, avg_int, mos_pct, wacc, safe_ltg, exit_mult, curr_symbol)
     pdf_spot.download_button(label="📄 Download PDF", data=pdf_bytes, file_name=f"{ticker}_Valuation.pdf", mime="application/pdf")
