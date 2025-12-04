@@ -326,6 +326,7 @@ disabled_cols = display_cols if not is_unlocked else ["Year 0"]
 
 df_display = df_base.T
 df_display.columns = display_cols
+# The 'map' fix for pandas compatibility
 df_formatted = df_display.map(lambda x: f"{x:,.2f}")
 
 edited_df = st.data_editor(
@@ -370,11 +371,7 @@ try:
     
     # 2. H-MODEL (SMOOTHING) TV
     # H = Half-life of the high growth period (assuming the next 5 years fade)
-    # H = 5 / 2 = 2.5
     h_period = 2.5
-    # The H-model TV = Standard Gordon TV + "Fade Premium"
-    # Premium = (FCF5 * H * (Short_Growth - Long_Growth)) / (WACC - Long_Growth)
-    # We use g_rev as proxy for short term growth rate exiting year 5
     fade_premium = (fcf5_final * h_period * (g_rev - safe_ltg)) / (wacc - safe_ltg)
     tv_h = tv_g + fade_premium
     pv_tv_h = tv_h * ((1+wacc)**-5)
@@ -393,7 +390,8 @@ try:
     p_h, ev_h = get_price(pv_tv_h)
     p_e, ev_e = get_price(pv_tv_e)
 
-    avg_int = (p_g + p_e + p_h) / 3 # Averaging all 3 models now
+    # Standard Average for legacy use
+    avg_int = (p_g + p_e + p_h) / 3 
     if cur_price > 0: mos_pct = (avg_int - cur_price) / cur_price
     else: mos_pct = 0.0
 
@@ -407,21 +405,16 @@ except Exception as e:
 st.divider()
 
 if cur_price > 0 and r_in > 0:
-    # 1. Define the Range
+    # 1. Define the Range (Football Field Logic)
     model_prices = [p_g, p_h, p_e]
     min_val = min(model_prices) # The "Floor"
     max_val = max(model_prices) # The "Ceiling"
     
     # 2. Calculate "Conservative" vs "Aggressive" Upside
-    # Note: We use the user's logic of (Value - Price) / Price
     mos_conservative = (min_val - cur_price) / cur_price
     mos_aggressive = (max_val - cur_price) / cur_price
     
-    # 3. Determine Color Logic for the Card
-    # If even the conservative model says buy, it's a "Strong Buy" (Green)
-    # If the average says buy but conservative says sell, it's "Moderate" (Orange)
-    # If all say sell, it's "Overvalued" (Red)
-    
+    # 3. Determine Color Logic
     if mos_conservative > 0:
         main_color = "status-under" # Green
         rating_txt = "STRONG BUY (Safe)"
@@ -472,7 +465,7 @@ if cur_price > 0 and r_in > 0:
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-# The bridge charts remain the same...
+# 3-Model Bridges
 c_g, c_h, c_e = st.columns(3)
 def make_bridge(pv_fcf, pv_tv, ev, debt, cash, eq):
     return pd.DataFrame({
@@ -498,7 +491,7 @@ with c_e:
     st.dataframe(make_bridge(sum_pv_final, pv_tv_e, ev_e, debt_in, cash_in, ev_e-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
 
 # ==========================================
-# 11. SENSITIVITY TABLE (Existing)
+# 11. SENSITIVITY TABLE
 # ==========================================
 st.markdown("<br><hr><br>", unsafe_allow_html=True)
 c_sens, c_mc = st.columns([1, 1])
@@ -566,7 +559,7 @@ with c_sens:
     st.dataframe(df_sens.style.format(f"{curr_symbol}{{:,.2f}}").map(style_sens), use_container_width=True)
 
 # ==========================================
-# 12. MONTE CARLO SIMULATION (NEW)
+# 12. MONTE CARLO SIMULATION
 # ==========================================
 with c_mc:
     st.subheader("Monte Carlo Simulation 🎲")
@@ -611,7 +604,7 @@ with c_mc:
                 tv_e_sim = (ebit_sim + (rev_sim*dep_r)) * exit_mult # EBITDA approx
                 
                 # Value
-                ev_sim = (fcf5_sim * 4) + (tv_g_sim * df * 0.5) + (tv_e_sim * df * 0.5) # Rough approximation of sum of PVs
+                ev_sim = (fcf5_sim * 4) + (tv_g_sim * df * 0.5) + (tv_e_sim * df * 0.5) # Rough approximation
                 eq_sim = ev_sim - (debt_in - cash_in)
                 share_sim = eq_sim / shares_in
                 sim_results.append(share_sim)
