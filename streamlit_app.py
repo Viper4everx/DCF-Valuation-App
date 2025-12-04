@@ -85,18 +85,20 @@ def create_pdf(ticker, date, price, int_val, upside, wacc, ltg, exit_m, c_curr):
 # 3. HELPER FUNCTIONS
 # ==========================================
 def fmt_comma(val):
-    if pd.isna(val): return "0.00"
+    if pd.isna(val) or np.isnan(val): return "0.00"
     return f"{val:,.2f}"
 
 def clean_currency(val, symbol="$"):
-    if isinstance(val, (int, float)): return float(val)
+    if isinstance(val, (int, float)): 
+        if np.isnan(val): return 0.0
+        return float(val)
     if pd.isna(val) or val == "": return 0.0
     clean = str(val).replace(',', '').replace(symbol, '').replace('€', '').replace('£', '').replace('¥', '').strip()
     try: return float(clean)
     except: return 0.0
 
 # ==========================================
-# 4. DATA ENGINE (SMART SHARE CALCULATION)
+# 4. DATA ENGINE (NAN-PROOF)
 # ==========================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_yahoo_data(ticker):
@@ -113,7 +115,7 @@ def get_yahoo_data(ticker):
             hist = tk.history(period="1d")
             price = hist['Close'].iloc[-1] if not hist.empty else 0.0
 
-        # === FIX: ROBUST SHARE COUNT LOGIC ===
+        # === SHARE COUNT LOGIC ===
         shares = info.get('impliedSharesOutstanding')
         if not shares: shares = info.get('sharesOutstanding')
         
@@ -136,12 +138,14 @@ def get_yahoo_data(ticker):
         fin_curr = info.get('financialCurrency', price_curr)
         
         actual_ev_ebitda = info.get('enterpriseToEbitda')
+        if actual_ev_ebitda is None or np.isnan(actual_ev_ebitda): actual_ev_ebitda = 0.0
+        
         beta_raw = info.get('beta')
         
         try:
             tnx = yf.Ticker("^TNX")
             rf_rate = tnx.fast_info.last_price
-            if not rf_rate: rf_rate = 4.0
+            if not rf_rate or np.isnan(rf_rate): rf_rate = 4.0
         except:
             rf_rate = 4.0
         
@@ -174,7 +178,10 @@ def get_yahoo_data(ticker):
         def get_val(df, keys):
             if df.empty: return 0.0
             for k in keys:
-                if k in df.index: return df.loc[k].iloc[0]
+                if k in df.index: 
+                    val = df.loc[k].iloc[0]
+                    if pd.isna(val) or np.isnan(val): return 0.0
+                    return val
             return 0.0
 
         data = {}
@@ -191,13 +198,27 @@ def get_yahoo_data(ticker):
              
         data['Capex'] = abs(get_val(cf, ['Capital Expenditure', 'Capital Expenditures'])) * factor
         data['SBC'] = get_val(cf, ['Stock Based Compensation']) * factor
-        data['ChangeInWC'] = get_val(cf, ['Change In Working Capital', 'Changes In Cash']) * factor
+        data['ChangeInWC'] = get_val(cf, ['Change In Working Capital', 'Changes In Cash', 'Change To Netincome']) * factor
         
         data['Debt'] = get_val(bs, ['Total Debt', 'Long Term Debt']) * factor
         data['Cash'] = get_val(bs, ['Cash And Cash Equivalents']) * factor
         data['Interest'] = abs(get_val(inc, ['Interest Expense', 'Interest Expense Non Operating'])) * factor
-        data['Beta'] = beta_raw if beta_raw else 1.0
+        
+        # === FIX: CLEAN BETA ===
+        if beta_raw is None or np.isnan(beta_raw):
+            data['Beta'] = 1.0 # Default to Market Beta
+        else:
+            data['Beta'] = float(beta_raw)
+            
         data['RiskFree'] = rf_rate
+        
+        # Country Risk
+        country = info.get('country', 'United States')
+        country_risk = 0.0
+        if country == 'China': country_risk = 1.5
+        elif country == 'Brazil': country_risk = 2.2
+        elif country not in ['United States', 'Canada', 'United Kingdom', 'Germany', 'France', 'Japan']: country_risk = 1.0
+        data['CountryRisk'] = country_risk
         
         return data, price, shares, fx_msg, price_curr, industry, actual_ev_ebitda, last_date_str
         
@@ -215,7 +236,7 @@ with c_tick:
 pdf_spot = c_pdf.empty()
 
 if 'y0' not in st.session_state:
-    st.session_state.y0 = {k:0.0 for k in ['Revenue','EBIT','Depreciation','Capex','Debt','Cash','Interest','Beta','RiskFree','SBC','ChangeInWC','PreTaxIncome','TaxProvision']}
+    st.session_state.y0 = {k:0.0 for k in ['Revenue','EBIT','Depreciation','Capex','Debt','Cash','Interest','Beta','RiskFree','CountryRisk','SBC','ChangeInWC','PreTaxIncome','TaxProvision']}
 
 if 'reset_key' not in st.session_state:
     st.session_state.reset_key = 0
@@ -320,12 +341,13 @@ with st.sidebar:
     
     beta_in = st.session_state.y0.get('Beta', 1.0)
     rf_in = st.session_state.y0.get('RiskFree', 4.0)
+    country_risk = st.session_state.y0.get('CountryRisk', 0.0)
     interest_in = st.session_state.y0.get('Interest', 0.0)
     debt_val = st.session_state.y0.get('Debt', 0.0)
     equity_val = cur_price * shares_in
     
     erp = 5.0 
-    cost_equity = (rf_in + (beta_in * erp)) / 100
+    cost_equity = (rf_in + (beta_in * erp) + country_risk) / 100
     
     if debt_val > 0:
         cost_debt = interest_in / debt_val
@@ -351,9 +373,11 @@ with st.sidebar:
     calc_wacc_pct = calc_wacc * 100
     
     if calc_wacc_pct < 6.0: calc_wacc_pct = 6.0
+    if np.isnan(calc_wacc_pct): calc_wacc_pct = 9.0 # Absolute safety net
     
     with st.expander("Show WACC Calculation"):
         st.caption(f"Risk-Free Rate: {rf_in:.2f}%")
+        st.caption(f"Country Risk: {country_risk:.2f}%")
         st.caption(f"Beta: {beta_in:.2f}")
         st.caption(f"Cost of Equity: {cost_equity:.1%}")
         st.caption(f"Cost of Debt (After Tax): {cost_debt*(1-eff_tax_rate):.1%}")
@@ -390,18 +414,15 @@ with st.sidebar:
     
     term_cap_ratio = st.slider("Terminal Capex / D&A", 0.5, 1.5, 1.0, 0.1, help="1.0 means Capex matches Depreciation")
 
-    # === GLOBAL RATIOS (The Fix: Calculated here, used everywhere) ===
-    # Ratios to project future years
+    # === GLOBAL RATIOS (Calculated Once, Used Everywhere) ===
     cap_r = c_in/r_in if r_in > 0 else 0
     dep_r = d_in/r_in if r_in > 0 else 0
     
-    # NWC Ratio
     real_nwc = st.session_state.y0.get('ChangeInWC', 0)
     nwc_r = (real_nwc / r_in) if r_in > 0 else 0.0
     if nwc_r > 0.05: nwc_r = 0.05
     if nwc_r < -0.05: nwc_r = -0.05
     
-    # SBC Ratio
     sbc_r = (sbc_in / r_in) if r_in > 0 else 0.0
 
 # ==========================================
@@ -441,6 +462,7 @@ if r_in > 0:
         
         fcff = nopat + da - capex - dnwc + sbc_proj
         
+        # FIX 5: Mid-year discount
         pv = fcff * ((1 + wacc)**-(y - 0.5))
         
         base_data.append({'Year':y,'Revenue':rev,'EBIT':ebit,'NOPAT':nopat,'D&A':da,'Capex':capex,'FCFF':fcff,'PV':pv})
@@ -494,8 +516,6 @@ try:
         prev_col = f"Year {y-1}"
         rev_prev = clean_currency(edited_df.loc['Revenue', prev_col], curr_symbol)
         
-        # Use Global Ratios for NWC/SBC if table is not edited for them specifically
-        # (Table only shows Rev, EBIT, DA, Capex - NWC/SBC are derived from Revenue)
         dnwc = (rev_edit - rev_prev) * nwc_r
         sbc_proj = rev_edit * sbc_r
         
@@ -514,24 +534,18 @@ try:
 
     sum_pv_final = sum(fcf_stream)
     
-    # 1. Gordon Growth TV (Standard)
-    # FIX 3: Terminal Capex Ratio Slider used here
-    # Terminal FCF = NOPAT + D&A - (D&A * Ratio) - NWC
-    term_nopat = ebitda5_final * (1 - tax_rate) # Simplified NOPAT proxy
+    term_nopat = ebitda5_final * (1 - tax_rate) 
     term_capex = da5_final * term_cap_ratio
-    # Assuming 0 NWC change in perpetuity for simplicity, or keep small growth
     fcf5_normalized = (ebitda5_final - da5_final)*(1-tax_rate) + da5_final - term_capex
     
     tv_g = fcf5_normalized * (1+safe_ltg)/(wacc-safe_ltg)
     pv_tv_g = tv_g * ((1+wacc)**-5)
     
-    # 2. Conservative TV 
     wacc_cons = wacc + 0.01
     safe_ltg_cons = safe_ltg if safe_ltg < (wacc_cons - 0.015) else (wacc_cons - 0.015)
     tv_c = fcf5_normalized * (1+safe_ltg_cons)/(wacc_cons-safe_ltg_cons)
     pv_tv_c = tv_c * ((1+wacc)**-5)
     
-    # 3. Exit Multiple TV
     tv_e = ebitda5_final * exit_mult
     pv_tv_e = tv_e * ((1+wacc)**-5)
 
@@ -567,10 +581,10 @@ if cur_price > 0 and r_in > 0:
     
     if mos_conservative > 0:
         main_color = "status-under"
-        rating_txt = "STRONG BUY"
+        rating_txt = "STRONG BUY (Safe)"
     elif mos_pct > 0.20: 
         main_color = "status-under"
-        rating_txt = "STRONG BUY"
+        rating_txt = "STRONG BUY (High Upside)"
     elif mos_pct > 0:
         main_color = "text-orange"
         rating_txt = "MODERATE BUY"
