@@ -10,6 +10,7 @@ from reportlab.lib.pagesizes import letter
 # ==========================================
 st.set_page_config(page_title="DCF Valuation Tool", layout="wide", initial_sidebar_state="expanded")
 
+# Custom CSS for "Glassmorphism" look
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
@@ -46,6 +47,7 @@ st.markdown('<h1 style="text-align:center; margin-bottom: 30px;">DCF Valuation T
 # 2. PDF GENERATION ENGINE
 # ==========================================
 def create_pdf(ticker, date, price, int_val, upside, wacc, ltg, exit_m, c_curr):
+    """Generates a downloadable PDF report using ReportLab"""
     buffer = BytesIO()
     c = canvas.Canvas(buffer, pagesize=letter)
     width, height = letter
@@ -86,9 +88,10 @@ def fmt_comma(val):
     return f"{val:,.2f}"
 
 def clean_currency(val, symbol="$"):
-    """Cleans string to float: '130,497.00' -> 130497.0"""
+    """Cleans string inputs back to float for calculation"""
     if isinstance(val, (int, float)): return float(val)
     if pd.isna(val) or val == "": return 0.0
+    # Remove common currency symbols and commas
     clean = str(val).replace(',', '').replace(symbol, '').replace('€', '').replace('£', '').replace('¥', '').strip()
     try: return float(clean)
     except: return 0.0
@@ -116,7 +119,7 @@ def get_yahoo_data(ticker):
             try: shares = tk.fast_info.shares_outstanding
             except: pass
         if not shares: shares = 1e9
-        shares = shares / 1e6 # Millions
+        shares = shares / 1e6 # Convert to Millions
 
         industry = info.get('industry', 'Unknown')
         price_curr = info.get('currency', 'USD')
@@ -125,6 +128,7 @@ def get_yahoo_data(ticker):
         fx_rate = 1.0
         fx_msg = ""
         
+        # 2. Currency Normalization (Crucial for non-USD stocks)
         if price_curr != fin_curr:
             pair = f"{fin_curr}{price_curr}=X"
             try:
@@ -150,7 +154,7 @@ def get_yahoo_data(ticker):
             return 0.0
 
         data = {}
-        factor = fx_rate / 1e6 # Millions
+        factor = fx_rate / 1e6 # Adjust to Price Currency & Millions
         
         data['Revenue'] = get_val(inc, ['Total Revenue', 'Total Net Sales']) * factor
         data['EBIT']    = get_val(inc, ['Operating Income', 'EBIT']) * factor
@@ -176,6 +180,7 @@ with c_tick:
 
 pdf_spot = c_pdf.empty()
 
+# Initialize Session State
 if 'y0' not in st.session_state:
     st.session_state.y0 = {k:0.0 for k in ['Revenue','EBIT','Depreciation','Capex','Debt','Cash']}
 
@@ -266,6 +271,7 @@ with st.sidebar:
     st.subheader("Drivers")
     st.caption(f"Detected Industry: {industry_name}")
     
+    # Simple logic to guess defaults based on current margin
     current_margin = (e_in / r_in) if r_in > 0 else 0.0
     if current_margin > 0.30: def_growth, def_mult = 15.0, 25.0
     elif current_margin < 0.10: def_growth, def_mult = 3.0, 8.0
@@ -283,7 +289,7 @@ with st.sidebar:
 # ==========================================
 years = range(1, 6)
 base_data = []
-safe_ltg = ltg if ltg < wacc else (wacc - 0.005)
+safe_ltg = ltg if ltg < wacc else (wacc - 0.005) # Prevent divide by zero or negative value
 
 if r_in > 0:
     nopat0 = e_in * (1 - tax_rate)
@@ -327,10 +333,11 @@ display_cols = [f"Year {y}" for y in range(6)]
 disabled_cols = display_cols if not is_unlocked else ["Year 0"]
 
 # CONVERT DATAFRAME TO STRINGS WITH COMMAS
-# This is the key fix. The data editor sees strings "130,497.00" so it shows commas.
 df_display = df_base.T
 df_display.columns = display_cols
-df_formatted = df_display.applymap(lambda x: f"{x:,.2f}")
+
+# FIXED: Replaced applymap with map to avoid depreciation warnings
+df_formatted = df_display.map(lambda x: f"{x:,.2f}")
 
 edited_df = st.data_editor(
     df_formatted,
@@ -344,6 +351,7 @@ edited_df = st.data_editor(
 # ==========================================
 try:
     fcf_stream = []
+    # Recalculate based on Editable Table (allows manual overrides)
     for y in years:
         col_name = f"Year {y}"
         rev_edit = clean_currency(edited_df.loc['Revenue', col_name], curr_symbol)
@@ -366,15 +374,21 @@ try:
             ebitda5_final = ebit_edit + da_edit
 
     sum_pv_final = sum(fcf_stream)
+    
+    # Terminal Value: Gordon Growth
     tv_g = fcf5_final * (1+safe_ltg)/(wacc-safe_ltg)
     pv_tv_g = tv_g * ((1+wacc)**-5)
+    
+    # Terminal Value: Exit Multiple
     tv_e = ebitda5_final * exit_mult
     pv_tv_e = tv_e * ((1+wacc)**-5)
 
+    # Equity Value & Share Price (Gordon)
     ev_g = sum_pv_final + pv_tv_g
     eq_g = ev_g - (debt_in - cash_in)
     p_g = (eq_g / shares_in) if shares_in > 0 else 0
 
+    # Equity Value & Share Price (Multiple)
     ev_e = sum_pv_final + pv_tv_e
     eq_e = ev_e - (debt_in - cash_in)
     p_e = (eq_e / shares_in) if shares_in > 0 else 0
@@ -423,14 +437,12 @@ bridge_format = f"{curr_symbol}{{:,.2f}}M"
 
 with c_g:
     st.markdown(f"""<div class="val-card border-purple"><div class="val-title">Perpetuity Growth 🌊</div><div class="val-sub">Based on {safe_ltg:.1%} long-term growth</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-purple">{curr_symbol}{p_g:,.2f}</div><div class="val-ev"><span>Enterprise Value </span><strong>{curr_symbol}{ev_g:,.2f}M</strong></div></div>""", unsafe_allow_html=True)
-    # ADDED SPACE HERE
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("##### Bridge (Gordon) - Millions")
     st.dataframe(make_bridge(sum_pv_final, pv_tv_g, ev_g, debt_in, cash_in, ev_g-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
 
 with c_e:
     st.markdown(f"""<div class="val-card border-green"><div class="val-title">Exit Multiple 💼</div><div class="val-sub">Based on {exit_mult}x EBITDA multiple</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-green">{curr_symbol}{p_e:,.2f}</div><div class="val-ev"><span>Enterprise Value </span><strong>{curr_symbol}{ev_e:,.2f}M</strong></div></div>""", unsafe_allow_html=True)
-    # ADDED SPACE HERE
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("##### Bridge (Multiple) - Millions")
     st.dataframe(make_bridge(sum_pv_final, pv_tv_e, ev_e, debt_in, cash_in, ev_e-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
@@ -443,6 +455,7 @@ st.subheader("Sensitivity Analysis 🎯")
 st.caption("Implied Share Price based on WACC vs. Terminal Growth Rate")
 
 def quick_dcf_calc(w, t_g):
+    # NOTE: This uses global driver inputs (g_rev, etc), not the manual overrides in the table above.
     cap_r = c_in/r_in if r_in else 0
     dep_r = d_in/r_in if r_in else 0
     nwc_r = 0.02
@@ -493,6 +506,7 @@ df_sens = pd.DataFrame(sens_data, index=[f"{w:.1%}" for w in wacc_range])
 df_sens.index.name = "WACC"
 df_sens.columns.name = "Terminal Growth"
 
+# FIXED: Replaced applymap with map
 def style_sens(val):
     if val == 0: return 'background-color: gray; color: white;'
     color = '#2a2a3e' 
@@ -500,5 +514,5 @@ def style_sens(val):
     elif val < cur_price * 0.9: color = '#4a151b'
     return f'background-color: {color}; color: white; border: 1px solid #444;'
 
-st.dataframe(df_sens.style.format(f"{curr_symbol}{{:,.2f}}").applymap(style_sens), use_container_width=True)
+st.dataframe(df_sens.style.format(f"{curr_symbol}{{:,.2f}}").map(style_sens), use_container_width=True)
 st.info("💡 **How to read:** Green cells indicate the stock is undervalued even with these assumptions. Red indicates overvaluation.")
