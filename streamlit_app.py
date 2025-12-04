@@ -520,7 +520,7 @@ if cur_price > 0 and r_in > 0:
         rating_txt = "STRONG BUY (Safe)"
     elif mos_pct > 0.20: # If Average Upside > 20%
         main_color = "status-under"
-        rating_txt = "STRONG BUY (High Upside)"
+        rating_txt = "STRONG BUY"
     elif mos_pct > 0:
         main_color = "text-orange"
         rating_txt = "MODERATE BUY"
