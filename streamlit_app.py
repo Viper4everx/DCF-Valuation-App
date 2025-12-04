@@ -402,22 +402,68 @@ except Exception as e:
     ev_g, ev_h, ev_e = 0,0,0
 
 # ==========================================
-# 10. RESULTS VISUALIZATION
+# 10. RESULTS VISUALIZATION (FINAL PRO VERSION)
 # ==========================================
 st.divider()
 
 if cur_price > 0 and r_in > 0:
-    s_col = "status-under" if mos_pct >= 0 else "status-over"
-    s_txt = "UNDERVALUED" if mos_pct >= 0 else "OVERVALUED"
+    # 1. Define the Range
+    model_prices = [p_g, p_h, p_e]
+    min_val = min(model_prices) # The "Floor"
+    max_val = max(model_prices) # The "Ceiling"
+    
+    # 2. Calculate "Conservative" vs "Aggressive" Upside
+    # Note: We use the user's logic of (Value - Price) / Price
+    mos_conservative = (min_val - cur_price) / cur_price
+    mos_aggressive = (max_val - cur_price) / cur_price
+    
+    # 3. Determine Color Logic for the Card
+    # If even the conservative model says buy, it's a "Strong Buy" (Green)
+    # If the average says buy but conservative says sell, it's "Moderate" (Orange)
+    # If all say sell, it's "Overvalued" (Red)
+    
+    if mos_conservative > 0:
+        main_color = "status-under" # Green
+        rating_txt = "STRONG BUY (Safe)"
+    elif mos_pct > 0:
+        main_color = "text-orange" # Orange
+        rating_txt = "MODERATE BUY"
+    else:
+        main_color = "status-over" # Red
+        rating_txt = "OVERVALUED"
+
     st.markdown(f"""
-    <div class="glass-card" style="display:flex; justify-content: space-around; align-items: center;">
-        <div style="text-align:center;"><div class="val-label">CURRENT PRICE</div><div class="val-price">{curr_symbol}{cur_price:,.2f}</div></div>
-        <div style="text-align:center;">
-            <div class="val-label">INTRINSIC VALUE</div>
-            <div class="val-price text-blue" style="margin-bottom: 5px;">{curr_symbol}{avg_int:,.2f}</div>
-            <div style="font-size: 10px; opacity: 0.6; font-weight: 400;">(Average of 3 Models)</div>
+    <div class="glass-card">
+        <div style="display:flex; justify-content: space-around; align-items: center; margin-bottom: 15px;">
+            <div style="text-align:center;">
+                <div class="val-label">CURRENT PRICE</div>
+                <div class="val-price">{curr_symbol}{cur_price:,.2f}</div>
+            </div>
+            
+            <div style="text-align:center;">
+                <div class="val-label">INTRINSIC RANGE</div>
+                <div class="val-price text-blue" style="font-size: 32px; margin-bottom: 5px;">
+                    {curr_symbol}{min_val:,.0f} - {curr_symbol}{max_val:,.0f}
+                </div>
+                <div style="font-size: 12px; opacity: 0.8;">Average: {curr_symbol}{avg_int:,.2f}</div>
+            </div>
+            
+            <div style="text-align:center;">
+                <div class="val-label">RATING</div>
+                <div class="val-price {main_color}" style="font-size: 32px;">{rating_txt}</div>
+                <div style="{main_color}">Avg Upside: {mos_pct:+.1%}</div>
+            </div>
         </div>
-        <div style="text-align:center;"><div class="val-label">UPSIDE</div><div class="val-price {s_col}">{mos_pct:+.1%}</div><div class="{s_col}">{s_txt}</div></div>
+        
+        <div style="background: rgba(255,255,255,0.1); height: 8px; border-radius: 4px; position: relative; margin: 0 20px;">
+            <div style="position: absolute; left: 10%; right: 10%; top: 0; bottom: 0; background: #60a5fa; opacity: 0.3; border-radius: 4px;"></div>
+            
+            <div style="position: absolute; left: 10%; top: 12px; font-size: 10px; color: #60a5fa;">Low<br>{mos_conservative:+.0%}</div>
+            <div style="position: absolute; right: 10%; top: 12px; font-size: 10px; text-align: right; color: #60a5fa;">High<br>{mos_aggressive:+.0%}</div>
+        </div>
+        <div style="text-align: center; font-size: 11px; margin-top: 25px; opacity: 0.6;">
+            Conservative Upside: <strong>{mos_conservative:+.1%}</strong> &nbsp; | &nbsp; Aggressive Upside: <strong>{mos_aggressive:+.1%}</strong>
+        </div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -426,6 +472,7 @@ if cur_price > 0 and r_in > 0:
 
 st.markdown("<br>", unsafe_allow_html=True)
 
+# The bridge charts remain the same...
 c_g, c_h, c_e = st.columns(3)
 def make_bridge(pv_fcf, pv_tv, ev, debt, cash, eq):
     return pd.DataFrame({
