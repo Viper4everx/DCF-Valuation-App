@@ -123,8 +123,16 @@ def get_yahoo_data(ticker):
         price_curr = info.get('currency', 'USD')
         fin_curr = info.get('financialCurrency', price_curr)
         
-        # FIX: Fetch actual EV/EBITDA from market data
         actual_ev_ebitda = info.get('enterpriseToEbitda')
+        beta_raw = info.get('beta')
+        
+        # FIX: Fetch 10-Year Treasury Yield for WACC
+        try:
+            tnx = yf.Ticker("^TNX")
+            rf_rate = tnx.fast_info.last_price
+            if not rf_rate: rf_rate = 4.0
+        except:
+            rf_rate = 4.0
         
         fx_rate = 1.0
         fx_msg = ""
@@ -164,6 +172,11 @@ def get_yahoo_data(ticker):
         data['Debt'] = get_val(bs, ['Total Debt', 'Long Term Debt']) * factor
         data['Cash'] = get_val(bs, ['Cash And Cash Equivalents']) * factor
         
+        # WACC Specifics
+        data['Interest'] = abs(get_val(inc, ['Interest Expense', 'Interest Expense Non Operating'])) * factor
+        data['Beta'] = beta_raw if beta_raw else 1.0
+        data['RiskFree'] = rf_rate
+        
         return data, price, shares, fx_msg, price_curr, industry, actual_ev_ebitda
         
     except Exception as e:
@@ -180,7 +193,7 @@ with c_tick:
 pdf_spot = c_pdf.empty()
 
 if 'y0' not in st.session_state:
-    st.session_state.y0 = {k:0.0 for k in ['Revenue','EBIT','Depreciation','Capex','Debt','Cash']}
+    st.session_state.y0 = {k:0.0 for k in ['Revenue','EBIT','Depreciation','Capex','Debt','Cash','Interest','Beta','RiskFree']}
 
 if 'reset_key' not in st.session_state:
     st.session_state.reset_key = 0
@@ -191,7 +204,6 @@ industry_name = "Unknown"
 if ticker:
     with st.spinner(f"Analysing {ticker}..."):
         if 'last_ticker' not in st.session_state or st.session_state.last_ticker != ticker:
-            # Updated Unpacking
             d, cur_price, shares_def, fx_msg, currency, ind_name, ev_ebitda = get_yahoo_data(ticker)
             if d:
                 st.session_state.y0 = d
@@ -264,8 +276,48 @@ with st.sidebar:
         mult_g, mult_m, mult_e = 1.0, 1.0, 1.0
 
     st.divider()
-    st.header("Assumptions")
-    wacc = st.number_input("WACC %", value=9.0, step=0.1, format="%.1f", key=f"w_{ticker}_{scenario}") / 100
+    
+    # === AUTOMATED WACC CALCULATION (CAPM) ===
+    st.subheader("WACC Logic")
+    
+    # Defaults
+    beta_in = st.session_state.y0.get('Beta', 1.0)
+    rf_in = st.session_state.y0.get('RiskFree', 4.0)
+    interest_in = st.session_state.y0.get('Interest', 0.0)
+    debt_val = st.session_state.y0.get('Debt', 0.0)
+    equity_val = cur_price * shares_in
+    
+    # Cost of Equity (CAPM)
+    erp = 5.0 # Equity Risk Premium assumption
+    cost_equity = (rf_in + (beta_in * erp)) / 100
+    
+    # Cost of Debt (Effective Interest Rate)
+    cost_debt = (interest_in / debt_val) if debt_val > 0 else (rf_in + 1.5)/100
+    if cost_debt > 0.15: cost_debt = 0.08 # Cap if data is messy
+    
+    # Weights
+    total_cap = equity_val + debt_val
+    if total_cap <= 0: total_cap = 1.0
+    w_e = equity_val / total_cap
+    w_d = debt_val / total_cap
+    
+    # Tax Rate (Default 21%)
+    tax_default = 0.21
+    
+    # WACC Formula
+    calc_wacc = (w_e * cost_equity) + (w_d * cost_debt * (1 - tax_default))
+    calc_wacc_pct = calc_wacc * 100
+    
+    with st.expander("Show WACC Calculation"):
+        st.caption(f"Risk-Free Rate: {rf_in:.1f}%")
+        st.caption(f"Beta: {beta_in:.2f}")
+        st.caption(f"Cost of Equity: {cost_equity:.1%}")
+        st.caption(f"Cost of Debt (After Tax): {cost_debt*(1-tax_default):.1%}")
+        st.caption(f"Weight: {w_e:.0%} Eq / {w_d:.0%} Dbt")
+        st.divider()
+        st.write(f"**Calculated WACC: {calc_wacc_pct:.1f}%**")
+        
+    wacc = st.number_input("WACC %", value=float(f"{calc_wacc_pct:.1f}"), step=0.1, format="%.1f", key=f"w_{ticker}_{scenario}") / 100
     
     st.divider()
     st.subheader("Drivers")
