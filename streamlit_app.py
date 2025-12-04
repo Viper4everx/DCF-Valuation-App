@@ -96,12 +96,11 @@ def clean_currency(val, symbol="$"):
     except: return 0.0
 
 # ==========================================
-# 4. DATA ENGINE (CLEAN - NO MANUAL SESSION)
+# 4. DATA ENGINE (SMART SHARE CALCULATION)
 # ==========================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_yahoo_data(ticker):
     try:
-        # Standard YF call (Let YF handle the session)
         tk = yf.Ticker(ticker)
         
         try: info = tk.info
@@ -114,12 +113,27 @@ def get_yahoo_data(ticker):
             hist = tk.history(period="1d")
             price = hist['Close'].iloc[-1] if not hist.empty else 0.0
 
+        # === FIX: ROBUST SHARE COUNT LOGIC ===
+        # Priority 1: Direct Info
         shares = info.get('sharesOutstanding')
-        if not shares: 
+        
+        # Priority 2: Fast Info
+        if not shares:
             try: shares = tk.fast_info.shares_outstanding
             except: pass
-        if not shares: shares = 1e9
-        shares = shares / 1e6
+            
+        # Priority 3: Calculate from Market Cap (Most Robust)
+        if not shares or shares < 1000: # Check for bad data
+            try:
+                mkt_cap = tk.fast_info.market_cap
+                if mkt_cap and price > 0:
+                    shares = mkt_cap / price
+            except: pass
+            
+        # Final Fallback (with warning indicator in console)
+        if not shares: shares = 1e9 # 1 Billion default
+        
+        shares = shares / 1e6 # Convert to Millions
 
         industry = info.get('industry', 'Unknown')
         price_curr = info.get('currency', 'USD')
@@ -128,7 +142,6 @@ def get_yahoo_data(ticker):
         actual_ev_ebitda = info.get('enterpriseToEbitda')
         beta_raw = info.get('beta')
         
-        # FIX: Fetch 10-Year Treasury Yield for WACC
         try:
             tnx = yf.Ticker("^TNX")
             rf_rate = tnx.fast_info.last_price
@@ -173,8 +186,6 @@ def get_yahoo_data(ticker):
         data['Capex'] = abs(get_val(cf, ['Capital Expenditure', 'Capital Expenditures'])) * factor
         data['Debt'] = get_val(bs, ['Total Debt', 'Long Term Debt']) * factor
         data['Cash'] = get_val(bs, ['Cash And Cash Equivalents']) * factor
-        
-        # WACC Specifics
         data['Interest'] = abs(get_val(inc, ['Interest Expense', 'Interest Expense Non Operating'])) * factor
         data['Beta'] = beta_raw if beta_raw else 1.0
         data['RiskFree'] = rf_rate
@@ -190,7 +201,6 @@ def get_yahoo_data(ticker):
 c_tick, c_space, c_pdf = st.columns([1, 4, 1], vertical_alignment="bottom")
 
 with c_tick:
-    # CHANGED: Default is now EMPTY to prevent auto-fetch on load
     ticker = st.text_input("Ticker", "").upper()
 
 pdf_spot = c_pdf.empty()
@@ -355,7 +365,6 @@ with st.sidebar:
 years = range(1, 6)
 base_data = []
 
-# FIX: Increased safety buffer to 1.5% to prevent infinite valuations
 safe_ltg = ltg if ltg < (wacc - 0.015) else (wacc - 0.015)
 
 if r_in > 0:
@@ -447,17 +456,14 @@ try:
 
     sum_pv_final = sum(fcf_stream)
     
-    # 1. Gordon Growth TV (Standard)
     tv_g = fcf5_final * (1+safe_ltg)/(wacc-safe_ltg)
     pv_tv_g = tv_g * ((1+wacc)**-5)
     
-    # 2. Conservative TV (Standard Gordon but with WACC + 1% cushion)
     wacc_cons = wacc + 0.01
     safe_ltg_cons = safe_ltg if safe_ltg < (wacc_cons - 0.015) else (wacc_cons - 0.015)
     tv_c = fcf5_final * (1+safe_ltg_cons)/(wacc_cons-safe_ltg_cons)
     pv_tv_c = tv_c * ((1+wacc)**-5)
     
-    # 3. Exit Multiple TV
     tv_e = ebitda5_final * exit_mult
     pv_tv_e = tv_e * ((1+wacc)**-5)
 
@@ -501,7 +507,6 @@ if cur_price > 0 and r_in > 0:
         main_color = "status-over"
         rating_txt = "OVERVALUED"
 
-    # HTML Block: Left-Aligned (Fixed)
     html_code = f"""
 <div class="glass-card">
 <div style="display:flex; justify-content: space-around; align-items: center; margin-bottom: 15px;">
@@ -550,16 +555,19 @@ bridge_format = f"{curr_symbol}{{:,.2f}}M"
 
 with c_g:
     st.markdown(f"""<div class="val-card border-purple"><div class="val-title">Perpetuity Growth</div><div class="val-sub">Stable {safe_ltg:.1%} long-term growth</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-purple">{curr_symbol}{p_g:,.2f}</div><div class="val-ev"><span>EV: </span><strong>{curr_symbol}{ev_g:,.2f}M</strong></div></div>""", unsafe_allow_html=True)
+    st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("##### Bridge (Gordon)", unsafe_allow_html=True)
     st.dataframe(make_bridge(sum_pv_final, pv_tv_g, ev_g, debt_in, cash_in, ev_g-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
 
 with c_c:
     st.markdown(f"""<div class="val-card border-orange"><div class="val-title">Conservative Case 🛡️</div><div class="val-sub">Higher Discount Rate (WACC + 1%)</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-orange">{curr_symbol}{p_c:,.2f}</div><div class="val-ev"><span>EV: </span><strong>{curr_symbol}{ev_c:,.2f}M</strong></div></div>""", unsafe_allow_html=True)
+    st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("##### Bridge (Conservative)", unsafe_allow_html=True)
     st.dataframe(make_bridge(sum_pv_final, pv_tv_c, ev_c, debt_in, cash_in, ev_c-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
 
 with c_e:
     st.markdown(f"""<div class="val-card border-green"><div class="val-title">Exit Multiple 💼</div><div class="val-sub">Based on {exit_mult}x EBITDA</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-green">{curr_symbol}{p_e:,.2f}</div><div class="val-ev"><span>EV: </span><strong>{curr_symbol}{ev_e:,.2f}M</strong></div></div>""", unsafe_allow_html=True)
+    st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("##### Bridge (Multiple)", unsafe_allow_html=True)
     st.dataframe(make_bridge(sum_pv_final, pv_tv_e, ev_e, debt_in, cash_in, ev_e-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
 
