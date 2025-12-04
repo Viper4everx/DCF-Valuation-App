@@ -665,7 +665,9 @@ with c_sens:
 # ==========================================
 with c_mc:
     st.subheader("Monte Carlo Simulation 🎲")
-    st.caption(f"Running 1,000 simulations with random variations in WACC, Growth, and Margins.")
+    st.caption(f"Running randomized scenarios to find probability.")
+    
+    sim_count = st.slider("Number of Simulations", 1000, 10000, 1000, step=1000)
     
     if st.button("Run Simulation", use_container_width=True):
         with st.spinner("Simulating..."):
@@ -673,33 +675,82 @@ with c_mc:
             sim_results = []
             
             # Create random distributions
-            w_dist = np.random.normal(wacc, wacc*0.1, 1000) 
-            g_dist = np.random.normal(g_rev, g_rev*0.2, 1000)
-            m_dist = np.random.normal(margin_tgt, margin_tgt*0.1, 1000)
+            w_dist = np.random.normal(wacc, wacc*0.1, sim_count) 
+            g_dist = np.random.normal(g_rev, g_rev*0.2, sim_count)
+            m_dist = np.random.normal(margin_tgt, margin_tgt*0.1, sim_count)
             
-            for i in range(1000):
+            for i in range(sim_count):
                 w_sim = w_dist[i]
                 g_sim = g_dist[i]
                 m_sim = m_dist[i]
                 
                 # Fast DCF Logic (Simplified for speed)
-                rev_sim = r_in * ((1+g_sim)**5) 
-                ebit_sim = rev_sim * m_sim
-                nopat_sim = ebit_sim * (1 - tax_rate)
+                # Full Fidelity Loop inside sim to match accuracy preference
+                pv_sum = 0.0
+                prev_rev_sim = r_in
                 
-                fcf_conv = (fcff0 / e_in) if e_in else 0.8
-                fcf5_sim = ebit_sim * fcf_conv
+                growth_decay_step_sim = 0.0
+                safe_ltg_sim = min(ltg, w_sim - 0.015)
                 
-                df = (1 + w_sim)**-5
+                if g_sim > safe_ltg_sim:
+                    target_y5 = (g_sim + safe_ltg_sim) / 2
+                    growth_decay_step_sim = (g_sim - target_y5) / 4
                 
-                safe_ltg_sim = min(ltg, w_sim - 0.01) 
-                tv_g_sim = fcf5_sim * (1+safe_ltg_sim)/(w_sim-safe_ltg_sim)
-                tv_e_sim = (ebit_sim + (rev_sim*dep_r)) * exit_mult 
+                fcf5_sim = 0.0
+                ebitda5_sim = 0.0
+                da5_sim = 0.0
+
+                for y in range(1, 6):
+                    current_g_sim = g_sim - (growth_decay_step_sim * (y - 1))
+                    if current_g_sim < safe_ltg_sim: current_g_sim = safe_ltg_sim
+                    
+                    rev_sim = prev_rev_sim * (1 + current_g_sim)
+                    ebit_sim = rev_sim * m_sim
+                    nopat_sim = ebit_sim * (1 - tax_rate)
+                    
+                    da_ratio = (d_in / r_in) if r_in > 0 else 0
+                    cap_ratio = (c_in / r_in) if r_in > 0 else 0
+                    
+                    da_sim = rev_sim * da_ratio
+                    capex_sim = rev_sim * cap_ratio
+                    dnwc_sim = (rev_sim - prev_rev_sim) * 0.02
+                    
+                    fcff_sim = nopat_sim + da_sim - capex_sim - dnwc_sim
+                    
+                    pv_sim = fcff_sim * ((1 + w_sim)**-y)
+                    pv_sum += pv_sim
+                    prev_rev_sim = rev_sim
+                    
+                    if y == 5:
+                        fcf5_sim = fcff_sim
+                        ebitda5_sim = ebit_sim + da_sim
+                        da5_sim = da_sim
                 
-                ev_sim = (fcf5_sim * 4) + (tv_g_sim * df * 0.5) + (tv_e_sim * df * 0.5) 
-                eq_sim = ev_sim - (debt_in - cash_in)
-                share_sim = eq_sim / shares_in
-                sim_results.append(share_sim)
+                # Terminal Values
+                # 1. Normalize Capex
+                fcf5_norm_sim = (ebitda5_sim - da5_sim)*(1-tax_rate) + da5_sim - (da5_sim * 0.95)
+                
+                tv_g_sim = fcf5_norm_sim * (1+safe_ltg_sim)/(w_sim-safe_ltg_sim)
+                pv_tv_g_sim = tv_g_sim * ((1+w_sim)**-5)
+                
+                tv_e_sim = ebitda5_sim * exit_mult
+                pv_tv_e_sim = tv_e_sim * ((1+w_sim)**-5)
+                
+                w_cons_sim = w_sim + 0.01
+                safe_ltg_cons = min(safe_ltg_sim, w_cons_sim - 0.015)
+                tv_c_sim = fcf5_norm_sim * (1+safe_ltg_cons)/(w_cons_sim-safe_ltg_cons)
+                pv_tv_c_sim = tv_c_sim * ((1+w_sim)**-5)
+                
+                ev_g = pv_sum + pv_tv_g_sim
+                ev_c = pv_sum + pv_tv_c_sim
+                ev_e = pv_sum + pv_tv_e_sim
+                
+                share_g = (ev_g - (debt_in - cash_in)) / shares_in
+                share_c = (ev_c - (debt_in - cash_in)) / shares_in
+                share_e = (ev_e - (debt_in - cash_in)) / shares_in
+                
+                avg_share_price = (share_g + share_c + share_e) / 3
+                sim_results.append(avg_share_price)
             
             # FIXED CHART: Use clean Numpy Bins instead of raw Interval objects
             sim_df = pd.DataFrame(sim_results, columns=["Price"])
