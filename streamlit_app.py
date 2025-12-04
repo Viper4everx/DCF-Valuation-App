@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 import numpy as np
+import requests
+import time
 from io import BytesIO
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
@@ -96,12 +98,20 @@ def clean_currency(val, symbol="$"):
     except: return 0.0
 
 # ==========================================
-# 4. DATA ENGINE (MILLIONS 1e6)
+# 4. DATA ENGINE (ROBUST / NO FAKE DATA)
 # ==========================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_yahoo_data(ticker):
+    # FIX: Use a Session with Browser Headers to avoid Rate Limiting
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    })
+
     try:
-        tk = yf.Ticker(ticker)
+        tk = yf.Ticker(ticker, session=session)
+        
+        # Try fetching info. If rate limited, this will fail.
         try: info = tk.info
         except: info = {}
         if info is None: info = {}
@@ -128,7 +138,7 @@ def get_yahoo_data(ticker):
         
         # FIX: Fetch 10-Year Treasury Yield for WACC
         try:
-            tnx = yf.Ticker("^TNX")
+            tnx = yf.Ticker("^TNX", session=session)
             rf_rate = tnx.fast_info.last_price
             if not rf_rate: rf_rate = 4.0
         except:
@@ -140,7 +150,7 @@ def get_yahoo_data(ticker):
         if price_curr != fin_curr:
             pair = f"{fin_curr}{price_curr}=X"
             try:
-                fx = yf.Ticker(pair)
+                fx = yf.Ticker(pair, session=session)
                 rate = fx.fast_info.last_price
                 if rate:
                     fx_rate = rate
@@ -152,7 +162,8 @@ def get_yahoo_data(ticker):
         bs = tk.balance_sheet
         cf = tk.cashflow
         
-        if inc.empty: raise ValueError("No financial statements found.")
+        # CRITICAL CHECK: If Yahoo returns empty data, do NOT use mock data. Raise error.
+        if inc.empty: raise ValueError("Yahoo Finance returned no data. You may be rate-limited.")
 
         def get_val(df, keys):
             if df.empty: return 0.0
@@ -180,7 +191,8 @@ def get_yahoo_data(ticker):
         return data, price, shares, fx_msg, price_curr, industry, actual_ev_ebitda
         
     except Exception as e:
-        return None, 0.0, 1.0, str(e), "USD", "Unknown", None
+        # If rate limited, return clear error (NO FAKE DATA)
+        return None, 0.0, 1.0, f"Connection Error: {str(e)}", "USD", "Unknown", None
 
 # ==========================================
 # 5. UI: INPUTS & SETUP
@@ -216,7 +228,9 @@ if ticker:
                 st.session_state.ev_ebitda_actual = ev_ebitda
                 st.session_state.reset_key += 1
             else:
-                st.error(f"Error: {fx_msg}")
+                # Error Handling State
+                st.error(f"Unable to fetch data: {fx_msg}")
+                st.warning("Yahoo Finance might be blocking requests. Please wait 60 seconds and try again.")
                 cur_price, shares_def = 0.0, 1.0
                 st.session_state.fx_msg = ""
                 st.session_state.currency = "USD"
@@ -280,7 +294,7 @@ with st.sidebar:
     # === AUTOMATED WACC CALCULATION (CAPM) ===
     st.subheader("WACC Logic")
     
-    # Defaults
+    # Defaults from Data Engine
     beta_in = st.session_state.y0.get('Beta', 1.0)
     rf_in = st.session_state.y0.get('RiskFree', 4.0)
     interest_in = st.session_state.y0.get('Interest', 0.0)
@@ -292,8 +306,14 @@ with st.sidebar:
     cost_equity = (rf_in + (beta_in * erp)) / 100
     
     # Cost of Debt (Effective Interest Rate)
-    cost_debt = (interest_in / debt_val) if debt_val > 0 else (rf_in + 1.5)/100
-    if cost_debt > 0.15: cost_debt = 0.08 # Cap if data is messy
+    # Default to 5% if no debt, or calc from interest expense
+    if debt_val > 0:
+        cost_debt = interest_in / debt_val
+    else:
+        cost_debt = (rf_in + 1.5) / 100
+        
+    # Cap cost of debt if data is messy (e.g. one-time charges)
+    if cost_debt > 0.15: cost_debt = 0.08 
     
     # Weights
     total_cap = equity_val + debt_val
@@ -309,7 +329,7 @@ with st.sidebar:
     calc_wacc_pct = calc_wacc * 100
     
     with st.expander("Show WACC Calculation"):
-        st.caption(f"Risk-Free Rate: {rf_in:.1f}%")
+        st.caption(f"Risk-Free Rate: {rf_in:.2f}%")
         st.caption(f"Beta: {beta_in:.2f}")
         st.caption(f"Cost of Equity: {cost_equity:.1%}")
         st.caption(f"Cost of Debt (After Tax): {cost_debt*(1-tax_default):.1%}")
