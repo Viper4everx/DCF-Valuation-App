@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
+import numpy as np
 from io import BytesIO
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
@@ -8,9 +9,8 @@ from reportlab.lib.pagesizes import letter
 # ==========================================
 # 1. CONFIGURATION & STYLING
 # ==========================================
-st.set_page_config(page_title="DCF Valuation Tool", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Pro DCF Valuation Tool", layout="wide", initial_sidebar_state="expanded")
 
-# Custom CSS for "Glassmorphism" look
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
@@ -31,8 +31,10 @@ body { font-family: 'Inter', sans-serif; background: linear-gradient(135deg, #1e
 .text-blue { color: #60a5fa; }
 .text-purple { color: #a78bfa; }
 .text-green { color: #34d399; }
+.text-orange { color: #fb923c; }
 .border-purple { border-left: 5px solid #8b5cf6; }
 .border-green { border-left: 5px solid #10b981; }
+.border-orange { border-left: 5px solid #fb923c; }
 
 /* Overrides */
 div[data-testid="stExpander"] { background-color: rgba(255,255,255,0.02); border-radius: 12px; }
@@ -41,13 +43,13 @@ th { text-align: center !important; }
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<h1 style="text-align:center; margin-bottom: 30px;">DCF Valuation Tool</h1>', unsafe_allow_html=True)
+st.markdown('<h1 style="text-align:center; margin-bottom: 30px;">Pro DCF Valuation Tool</h1>', unsafe_allow_html=True)
 
 # ==========================================
 # 2. PDF GENERATION ENGINE
 # ==========================================
 def create_pdf(ticker, date, price, int_val, upside, wacc, ltg, exit_m, c_curr):
-    """Generates a downloadable PDF report using ReportLab"""
+    """Generates a downloadable PDF report"""
     buffer = BytesIO()
     c = canvas.Canvas(buffer, pagesize=letter)
     width, height = letter
@@ -83,15 +85,12 @@ def create_pdf(ticker, date, price, int_val, upside, wacc, ltg, exit_m, c_curr):
 # 3. HELPER FUNCTIONS
 # ==========================================
 def fmt_comma(val):
-    """Formats number to string with commas: 130497 -> '130,497'"""
     if pd.isna(val): return "0.00"
     return f"{val:,.2f}"
 
 def clean_currency(val, symbol="$"):
-    """Cleans string inputs back to float for calculation"""
     if isinstance(val, (int, float)): return float(val)
     if pd.isna(val) or val == "": return 0.0
-    # Remove common currency symbols and commas
     clean = str(val).replace(',', '').replace(symbol, '').replace('€', '').replace('£', '').replace('¥', '').strip()
     try: return float(clean)
     except: return 0.0
@@ -103,7 +102,6 @@ def clean_currency(val, symbol="$"):
 def get_yahoo_data(ticker):
     try:
         tk = yf.Ticker(ticker)
-        
         try: info = tk.info
         except: info = {}
         if info is None: info = {}
@@ -119,7 +117,7 @@ def get_yahoo_data(ticker):
             try: shares = tk.fast_info.shares_outstanding
             except: pass
         if not shares: shares = 1e9
-        shares = shares / 1e6 # Convert to Millions
+        shares = shares / 1e6
 
         industry = info.get('industry', 'Unknown')
         price_curr = info.get('currency', 'USD')
@@ -128,7 +126,6 @@ def get_yahoo_data(ticker):
         fx_rate = 1.0
         fx_msg = ""
         
-        # 2. Currency Normalization (Crucial for non-USD stocks)
         if price_curr != fin_curr:
             pair = f"{fin_curr}{price_curr}=X"
             try:
@@ -140,7 +137,6 @@ def get_yahoo_data(ticker):
             except:
                 fx_msg = f"⚠️ FX Error: Could not fetch rate for {pair}."
 
-        # 3. Financial Statements
         inc = tk.income_stmt
         bs = tk.balance_sheet
         cf = tk.cashflow
@@ -154,7 +150,7 @@ def get_yahoo_data(ticker):
             return 0.0
 
         data = {}
-        factor = fx_rate / 1e6 # Adjust to Price Currency & Millions
+        factor = fx_rate / 1e6 
         
         data['Revenue'] = get_val(inc, ['Total Revenue', 'Total Net Sales']) * factor
         data['EBIT']    = get_val(inc, ['Operating Income', 'EBIT']) * factor
@@ -180,7 +176,6 @@ with c_tick:
 
 pdf_spot = c_pdf.empty()
 
-# Initialize Session State
 if 'y0' not in st.session_state:
     st.session_state.y0 = {k:0.0 for k in ['Revenue','EBIT','Depreciation','Capex','Debt','Cash']}
 
@@ -220,7 +215,6 @@ if ticker:
     if st.session_state.get('fx_msg'):
         st.info(f"💱 {st.session_state.fx_msg}")
 
-# YEAR 0 FORM (TEXT INPUTS -> COMMAS)
 st.markdown("### Year 0: Base Financials (Millions)")
 with st.expander("Expand to edit Year 0 Data", expanded=True):
     with st.form("y0_form"):
@@ -235,7 +229,7 @@ with st.expander("Expand to edit Year 0 Data", expanded=True):
         cash_in_str = c6.text_input("Total Cash", value=fmt_comma(st.session_state.y0['Cash']))
         shares_in_str = c7.text_input("Shares (Millions)", value=fmt_comma(shares_def))
         
-        # Convert back to float for math
+        # Convert back to float
         r_in = clean_currency(r_in_str, curr_symbol)
         e_in = clean_currency(e_in_str, curr_symbol)
         d_in = clean_currency(d_in_str, curr_symbol)
@@ -269,9 +263,7 @@ with st.sidebar:
     
     st.divider()
     st.subheader("Drivers")
-    st.caption(f"Detected Industry: {industry_name}")
     
-    # Simple logic to guess defaults based on current margin
     current_margin = (e_in / r_in) if r_in > 0 else 0.0
     if current_margin > 0.30: def_growth, def_mult = 15.0, 25.0
     elif current_margin < 0.10: def_growth, def_mult = 3.0, 8.0
@@ -289,7 +281,7 @@ with st.sidebar:
 # ==========================================
 years = range(1, 6)
 base_data = []
-safe_ltg = ltg if ltg < wacc else (wacc - 0.005) # Prevent divide by zero or negative value
+safe_ltg = ltg if ltg < wacc else (wacc - 0.005)
 
 if r_in > 0:
     nopat0 = e_in * (1 - tax_rate)
@@ -332,11 +324,8 @@ with c_tools:
 display_cols = [f"Year {y}" for y in range(6)]
 disabled_cols = display_cols if not is_unlocked else ["Year 0"]
 
-# CONVERT DATAFRAME TO STRINGS WITH COMMAS
 df_display = df_base.T
 df_display.columns = display_cols
-
-# FIXED: Replaced applymap with map to avoid depreciation warnings
 df_formatted = df_display.map(lambda x: f"{x:,.2f}")
 
 edited_df = st.data_editor(
@@ -347,11 +336,11 @@ edited_df = st.data_editor(
 )
 
 # ==========================================
-# 9. VALUATION LOGIC
+# 9. VALUATION LOGIC & H-MODEL
 # ==========================================
 try:
     fcf_stream = []
-    # Recalculate based on Editable Table (allows manual overrides)
+    # Recalculate based on Editable Table
     for y in years:
         col_name = f"Year {y}"
         rev_edit = clean_currency(edited_df.loc['Revenue', col_name], curr_symbol)
@@ -375,31 +364,42 @@ try:
 
     sum_pv_final = sum(fcf_stream)
     
-    # Terminal Value: Gordon Growth
+    # 1. GORDON GROWTH TV
     tv_g = fcf5_final * (1+safe_ltg)/(wacc-safe_ltg)
     pv_tv_g = tv_g * ((1+wacc)**-5)
     
-    # Terminal Value: Exit Multiple
+    # 2. H-MODEL (SMOOTHING) TV
+    # H = Half-life of the high growth period (assuming the next 5 years fade)
+    # H = 5 / 2 = 2.5
+    h_period = 2.5
+    # The H-model TV = Standard Gordon TV + "Fade Premium"
+    # Premium = (FCF5 * H * (Short_Growth - Long_Growth)) / (WACC - Long_Growth)
+    # We use g_rev as proxy for short term growth rate exiting year 5
+    fade_premium = (fcf5_final * h_period * (g_rev - safe_ltg)) / (wacc - safe_ltg)
+    tv_h = tv_g + fade_premium
+    pv_tv_h = tv_h * ((1+wacc)**-5)
+    
+    # 3. EXIT MULTIPLE TV
     tv_e = ebitda5_final * exit_mult
     pv_tv_e = tv_e * ((1+wacc)**-5)
 
-    # Equity Value & Share Price (Gordon)
-    ev_g = sum_pv_final + pv_tv_g
-    eq_g = ev_g - (debt_in - cash_in)
-    p_g = (eq_g / shares_in) if shares_in > 0 else 0
+    # Calculate Prices
+    def get_price(pv_tv_val):
+        ev = sum_pv_final + pv_tv_val
+        eq = ev - (debt_in - cash_in)
+        return (eq / shares_in) if shares_in > 0 else 0, ev
 
-    # Equity Value & Share Price (Multiple)
-    ev_e = sum_pv_final + pv_tv_e
-    eq_e = ev_e - (debt_in - cash_in)
-    p_e = (eq_e / shares_in) if shares_in > 0 else 0
+    p_g, ev_g = get_price(pv_tv_g)
+    p_h, ev_h = get_price(pv_tv_h)
+    p_e, ev_e = get_price(pv_tv_e)
 
-    avg_int = (p_g + p_e) / 2
+    avg_int = (p_g + p_e + p_h) / 3 # Averaging all 3 models now
     if cur_price > 0: mos_pct = (avg_int - cur_price) / cur_price
     else: mos_pct = 0.0
 
 except Exception as e:
-    p_g, p_e, avg_int, mos_pct = 0,0,0,0
-    ev_g, ev_e = 0,0
+    p_g, p_h, p_e, avg_int, mos_pct = 0,0,0,0,0
+    ev_g, ev_h, ev_e = 0,0,0
 
 # ==========================================
 # 10. RESULTS VISUALIZATION
@@ -415,7 +415,7 @@ if cur_price > 0 and r_in > 0:
         <div style="text-align:center;">
             <div class="val-label">INTRINSIC VALUE</div>
             <div class="val-price text-blue" style="margin-bottom: 5px;">{curr_symbol}{avg_int:,.2f}</div>
-            <div style="font-size: 10px; opacity: 0.6; font-weight: 400;">(Average Implied Value)</div>
+            <div style="font-size: 10px; opacity: 0.6; font-weight: 400;">(Average of 3 Models)</div>
         </div>
         <div style="text-align:center;"><div class="val-label">UPSIDE</div><div class="val-price {s_col}">{mos_pct:+.1%}</div><div class="{s_col}">{s_txt}</div></div>
     </div>
@@ -426,7 +426,7 @@ if cur_price > 0 and r_in > 0:
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-c_g, c_e = st.columns(2)
+c_g, c_h, c_e = st.columns(3)
 def make_bridge(pv_fcf, pv_tv, ev, debt, cash, eq):
     return pd.DataFrame({
         "Component": ["PV of 5y Cash Flows", "PV of Terminal", "Enterprise Value", "Less: Net Debt", "Equity Value"],
@@ -436,83 +436,154 @@ def make_bridge(pv_fcf, pv_tv, ev, debt, cash, eq):
 bridge_format = f"{curr_symbol}{{:,.2f}}M"
 
 with c_g:
-    st.markdown(f"""<div class="val-card border-purple"><div class="val-title">Perpetuity Growth 🌊</div><div class="val-sub">Based on {safe_ltg:.1%} long-term growth</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-purple">{curr_symbol}{p_g:,.2f}</div><div class="val-ev"><span>Enterprise Value </span><strong>{curr_symbol}{ev_g:,.2f}M</strong></div></div>""", unsafe_allow_html=True)
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown("##### Bridge (Gordon) - Millions")
+    st.markdown(f"""<div class="val-card border-purple"><div class="val-title">Perpetuity Growth</div><div class="val-sub">Stable {safe_ltg:.1%} long-term growth</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-purple">{curr_symbol}{p_g:,.2f}</div><div class="val-ev"><span>EV: </span><strong>{curr_symbol}{ev_g:,.2f}M</strong></div></div>""", unsafe_allow_html=True)
+    st.markdown("##### Bridge (Gordon)", unsafe_allow_html=True)
     st.dataframe(make_bridge(sum_pv_final, pv_tv_g, ev_g, debt_in, cash_in, ev_g-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
 
+with c_h:
+    st.markdown(f"""<div class="val-card border-orange"><div class="val-title">H-Model Fade 📉</div><div class="val-sub">Linear fade from {g_rev:.1%} to {safe_ltg:.1%}</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-orange">{curr_symbol}{p_h:,.2f}</div><div class="val-ev"><span>EV: </span><strong>{curr_symbol}{ev_h:,.2f}M</strong></div></div>""", unsafe_allow_html=True)
+    st.markdown("##### Bridge (H-Model)", unsafe_allow_html=True)
+    st.dataframe(make_bridge(sum_pv_final, pv_tv_h, ev_h, debt_in, cash_in, ev_h-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
+
 with c_e:
-    st.markdown(f"""<div class="val-card border-green"><div class="val-title">Exit Multiple 💼</div><div class="val-sub">Based on {exit_mult}x EBITDA multiple</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-green">{curr_symbol}{p_e:,.2f}</div><div class="val-ev"><span>Enterprise Value </span><strong>{curr_symbol}{ev_e:,.2f}M</strong></div></div>""", unsafe_allow_html=True)
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown("##### Bridge (Multiple) - Millions")
+    st.markdown(f"""<div class="val-card border-green"><div class="val-title">Exit Multiple 💼</div><div class="val-sub">Based on {exit_mult}x EBITDA</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-green">{curr_symbol}{p_e:,.2f}</div><div class="val-ev"><span>EV: </span><strong>{curr_symbol}{ev_e:,.2f}M</strong></div></div>""", unsafe_allow_html=True)
+    st.markdown("##### Bridge (Multiple)", unsafe_allow_html=True)
     st.dataframe(make_bridge(sum_pv_final, pv_tv_e, ev_e, debt_in, cash_in, ev_e-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
 
 # ==========================================
-# 11. SENSITIVITY TABLE
+# 11. SENSITIVITY TABLE (Existing)
 # ==========================================
 st.markdown("<br><hr><br>", unsafe_allow_html=True)
-st.subheader("Sensitivity Analysis 🎯")
-st.caption("Implied Share Price based on WACC vs. Terminal Growth Rate")
+c_sens, c_mc = st.columns([1, 1])
 
-def quick_dcf_calc(w, t_g):
-    # NOTE: This uses global driver inputs (g_rev, etc), not the manual overrides in the table above.
-    cap_r = c_in/r_in if r_in else 0
-    dep_r = d_in/r_in if r_in else 0
-    nwc_r = 0.02
-    
-    fcf_pv_sum = 0.0
-    prev_rev = r_in
-    last_fcf = 0.0
-    last_ebitda = 0.0
-    
-    for y in range(1, 6):
-        rev = prev_rev * (1 + g_rev)
-        ebit = rev * margin_tgt
-        nopat = ebit * (1 - tax_rate)
-        da = rev * dep_r
-        capex = rev * cap_r
-        dnwc = (rev - prev_rev) * nwc_r
+with c_sens:
+    st.subheader("Sensitivity Analysis 🎯")
+    st.caption("Implied Share Price based on WACC vs. Terminal Growth")
+
+    def quick_dcf_calc(w, t_g):
+        cap_r = c_in/r_in if r_in else 0
+        dep_r = d_in/r_in if r_in else 0
+        nwc_r = 0.02
+        fcf_pv_sum = 0.0
+        prev_rev = r_in
+        last_fcf = 0.0
+        last_ebitda = 0.0
         
-        fcff = nopat + da - capex - dnwc
-        pv = fcff * ((1 + w)**-y)
-        fcf_pv_sum += pv
-        prev_rev = rev
-        if y == 5:
-            last_fcf = fcff
-            last_ebitda = ebit + da 
+        for y in range(1, 6):
+            rev = prev_rev * (1 + g_rev)
+            ebit = rev * margin_tgt
+            nopat = ebit * (1 - tax_rate)
+            da = rev * dep_r
+            capex = rev * cap_r
+            dnwc = (rev - prev_rev) * nwc_r
+            fcff = nopat + da - capex - dnwc
+            pv = fcff * ((1 + w)**-y)
+            fcf_pv_sum += pv
+            prev_rev = rev
+            if y == 5:
+                last_fcf = fcff
+                last_ebitda = ebit + da 
 
-    tv_g = last_fcf * (1 + t_g) / (w - t_g)
-    pv_tv_g = tv_g * ((1 + w)**-5)
-    tv_e = last_ebitda * exit_mult
-    pv_tv_e = tv_e * ((1 + w)**-5)
+        tv_g = last_fcf * (1 + t_g) / (w - t_g)
+        pv_tv_g = tv_g * ((1 + w)**-5)
+        tv_e = last_ebitda * exit_mult
+        pv_tv_e = tv_e * ((1 + w)**-5)
+        
+        eq_g = (fcf_pv_sum + pv_tv_g) - (debt_in - cash_in)
+        eq_e = (fcf_pv_sum + pv_tv_e) - (debt_in - cash_in)
+        
+        return ((eq_g + eq_e) / 2) / shares_in if shares_in > 0 else 0
+
+    wacc_range = [wacc - 0.01, wacc - 0.005, wacc, wacc + 0.005, wacc + 0.01]
+    ltg_range = [ltg - 0.005, ltg - 0.0025, ltg, ltg + 0.0025, ltg + 0.005]
+
+    sens_data = {}
+    for t_g in ltg_range:
+        col_data = []
+        for w_r in wacc_range:
+            val = quick_dcf_calc(w_r, t_g)
+            col_data.append(val)
+        sens_data[f"{t_g:.2%}"] = col_data
+
+    df_sens = pd.DataFrame(sens_data, index=[f"{w:.1%}" for w in wacc_range])
+    df_sens.index.name = "WACC"
+    df_sens.columns.name = "Terminal Growth"
+
+    def style_sens(val):
+        if val == 0: return 'background-color: gray; color: white;'
+        color = '#2a2a3e' 
+        if val > cur_price * 1.1: color = '#105234'
+        elif val < cur_price * 0.9: color = '#4a151b'
+        return f'background-color: {color}; color: white; border: 1px solid #444;'
+
+    st.dataframe(df_sens.style.format(f"{curr_symbol}{{:,.2f}}").map(style_sens), use_container_width=True)
+
+# ==========================================
+# 12. MONTE CARLO SIMULATION (NEW)
+# ==========================================
+with c_mc:
+    st.subheader("Monte Carlo Simulation 🎲")
+    st.caption(f"Running 1,000 simulations with random variations in WACC, Growth, and Margins.")
     
-    eq_g = (fcf_pv_sum + pv_tv_g) - (debt_in - cash_in)
-    eq_e = (fcf_pv_sum + pv_tv_e) - (debt_in - cash_in)
-    
-    return ((eq_g + eq_e) / 2) / shares_in if shares_in > 0 else 0
-
-wacc_range = [wacc - 0.01, wacc - 0.005, wacc, wacc + 0.005, wacc + 0.01]
-ltg_range = [ltg - 0.005, ltg - 0.0025, ltg, ltg + 0.0025, ltg + 0.005]
-
-sens_data = {}
-for t_g in ltg_range:
-    col_data = []
-    for w_r in wacc_range:
-        val = quick_dcf_calc(w_r, t_g)
-        col_data.append(val)
-    sens_data[f"{t_g:.2%}"] = col_data
-
-df_sens = pd.DataFrame(sens_data, index=[f"{w:.1%}" for w in wacc_range])
-df_sens.index.name = "WACC"
-df_sens.columns.name = "Terminal Growth"
-
-# FIXED: Replaced applymap with map
-def style_sens(val):
-    if val == 0: return 'background-color: gray; color: white;'
-    color = '#2a2a3e' 
-    if val > cur_price * 1.1: color = '#105234'
-    elif val < cur_price * 0.9: color = '#4a151b'
-    return f'background-color: {color}; color: white; border: 1px solid #444;'
-
-st.dataframe(df_sens.style.format(f"{curr_symbol}{{:,.2f}}").map(style_sens), use_container_width=True)
-st.info("💡 **How to read:** Green cells indicate the stock is undervalued even with these assumptions. Red indicates overvaluation.")
+    if st.button("Run Simulation", use_container_width=True):
+        with st.spinner("Simulating..."):
+            np.random.seed(42) # Reproducible results
+            sim_results = []
+            
+            # Create random distributions
+            # WACC varies by +/- 10% relative (e.g. 9% -> 8.1% to 9.9%)
+            w_dist = np.random.normal(wacc, wacc*0.1, 1000) 
+            # Growth varies by +/- 20% relative
+            g_dist = np.random.normal(g_rev, g_rev*0.2, 1000)
+            # Margin varies by +/- 10% relative
+            m_dist = np.random.normal(margin_tgt, margin_tgt*0.1, 1000)
+            
+            for i in range(1000):
+                w_sim = w_dist[i]
+                g_sim = g_dist[i]
+                m_sim = m_dist[i]
+                
+                # Fast DCF Logic (Simplified for speed)
+                # Note: We use the H-Model + Exit Multiple average for the sim
+                
+                # 1. Project FCF
+                rev_sim = r_in * ((1+g_sim)**5) # Approximation of Year 5 Rev
+                ebit_sim = rev_sim * m_sim
+                nopat_sim = ebit_sim * (1 - tax_rate)
+                
+                # Approximation: FCF conversion ratio based on Year 0
+                fcf_conv = (fcff0 / e_in) if e_in else 0.8
+                fcf5_sim = ebit_sim * fcf_conv
+                
+                # Discount Factors
+                df = (1 + w_sim)**-5
+                
+                # Terminal Values
+                safe_ltg_sim = min(ltg, w_sim - 0.01) # Safety check
+                tv_g_sim = fcf5_sim * (1+safe_ltg_sim)/(w_sim-safe_ltg_sim)
+                tv_e_sim = (ebit_sim + (rev_sim*dep_r)) * exit_mult # EBITDA approx
+                
+                # Value
+                ev_sim = (fcf5_sim * 4) + (tv_g_sim * df * 0.5) + (tv_e_sim * df * 0.5) # Rough approximation of sum of PVs
+                eq_sim = ev_sim - (debt_in - cash_in)
+                share_sim = eq_sim / shares_in
+                sim_results.append(share_sim)
+            
+            # Plotting
+            sim_df = pd.DataFrame(sim_results, columns=["Price"])
+            # Remove outliers for chart readability
+            sim_df = sim_df[(sim_df['Price'] > 0) & (sim_df['Price'] < cur_price * 4)]
+            
+            st.bar_chart(sim_df['Price'].value_counts(bins=30).sort_index(), color="#60a5fa")
+            
+            p10 = np.percentile(sim_results, 10)
+            p50 = np.percentile(sim_results, 50)
+            p90 = np.percentile(sim_results, 90)
+            
+            st.markdown(f"""
+            <div style="display:flex; justify-content: space-between; font-size: 12px; margin-top: 10px;">
+                <div class="status-over">P10 (Bear): {curr_symbol}{p10:,.2f}</div>
+                <div class="text-blue">P50 (Base): {curr_symbol}{p50:,.2f}</div>
+                <div class="status-under">P90 (Bull): {curr_symbol}{p90:,.2f}</div>
+            </div>
+            """, unsafe_allow_html=True)
