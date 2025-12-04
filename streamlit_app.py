@@ -101,7 +101,7 @@ def clean_currency(val, symbol="$"):
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_yahoo_data(ticker):
     try:
-        # Reverted to simple call as requested by error message
+        # Standard YF call (Let YF handle the session)
         tk = yf.Ticker(ticker)
         
         try: info = tk.info
@@ -296,7 +296,6 @@ with st.sidebar:
     cost_equity = (rf_in + (beta_in * erp)) / 100
     
     # Cost of Debt (Effective Interest Rate)
-    # Default to 5% if no debt, or calc from interest expense
     if debt_val > 0:
         cost_debt = interest_in / debt_val
     else:
@@ -327,7 +326,7 @@ with st.sidebar:
         st.divider()
         st.write(f"**Calculated WACC: {calc_wacc_pct:.1f}%**")
         
-    wacc = st.number_input("WACC %", value=float(f"{calc_wacc_pct:.1f}"), step=0.1, format="%.1f", key=f"w_{ticker}_{scenario}") / 100
+    wacc = st.number_input("WACC %", value=float(f"{calc_wacc_pct:.1f}"), step=0.1, format="%.1f", key=f"w_{ticker}_{scenario}_{st.session_state.reset_key}") / 100
     
     st.divider()
     st.subheader("Drivers")
@@ -349,12 +348,13 @@ with st.sidebar:
     elif current_margin < 0.10: def_growth = 3.0
     else: def_growth = 5.0
 
-    g_rev = st.number_input("Revenue Growth %", value=def_growth * mult_g, step=0.5, format="%.1f", key=f"g_{ticker}_{scenario}") / 100
+    # FIX: Added reset_key to keys to prevent sticky 0s from previous failed runs
+    g_rev = st.number_input("Revenue Growth %", value=def_growth * mult_g, step=0.5, format="%.1f", key=f"g_{ticker}_{scenario}_{st.session_state.reset_key}") / 100
     m_def = (current_margin * 100)
-    margin_tgt = st.number_input("EBIT Margin %", value=float(f"{m_def * mult_m:.1f}"), step=0.5, format="%.1f", key=f"m_{ticker}_{scenario}") / 100
-    tax_rate = st.number_input("Tax Rate %", value=21.0, step=1.0, format="%.1f", key=f"t_{ticker}_{scenario}") / 100
-    ltg = st.number_input("Terminal Growth %", value=2.5, step=0.1, format="%.1f", key=f"l_{ticker}_{scenario}") / 100
-    exit_mult = st.number_input("Exit Multiple (x)", value=def_mult * mult_e, step=0.5, format="%.1f", key=f"e_{ticker}_{scenario}")
+    margin_tgt = st.number_input("EBIT Margin %", value=float(f"{m_def * mult_m:.1f}"), step=0.5, format="%.1f", key=f"m_{ticker}_{scenario}_{st.session_state.reset_key}") / 100
+    tax_rate = st.number_input("Tax Rate %", value=21.0, step=1.0, format="%.1f", key=f"t_{ticker}_{scenario}_{st.session_state.reset_key}") / 100
+    ltg = st.number_input("Terminal Growth %", value=2.5, step=0.1, format="%.1f", key=f"l_{ticker}_{scenario}_{st.session_state.reset_key}") / 100
+    exit_mult = st.number_input("Exit Multiple (x)", value=def_mult * mult_e, step=0.5, format="%.1f", key=f"e_{ticker}_{scenario}_{st.session_state.reset_key}")
 
 # ==========================================
 # 7. CALCULATION ENGINE (SMART DECAY)
@@ -516,7 +516,7 @@ if cur_price > 0 and r_in > 0:
         main_color = "status-over" # Red
         rating_txt = "OVERVALUED"
 
-    # HTML Block: Left-Aligned to prevent Raw Code Display
+    # HTML Block: Flattened to avoid Code Block rendering issue
     html_code = f"""
 <div class="glass-card">
 <div style="display:flex; justify-content: space-around; align-items: center; margin-bottom: 15px;">
@@ -688,7 +688,7 @@ with c_mc:
                 share_sim = eq_sim / shares_in
                 sim_results.append(share_sim)
             
-            # FIXED CHART: Use clean Numpy Bins instead of raw Interval objects
+            # FIXED CHART: Use Clean Numpy Bins
             sim_df = pd.DataFrame(sim_results, columns=["Price"])
             sim_df = sim_df[(sim_df['Price'] > 0) & (sim_df['Price'] < cur_price * 4)]
             
