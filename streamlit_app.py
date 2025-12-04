@@ -272,16 +272,13 @@ with st.sidebar:
     
     current_margin = (e_in / r_in) if r_in > 0 else 0.0
     
-    # === FIX: BETTER DEFAULT MULTIPLE LOGIC ===
-    # Priority 1: Use actual EV/EBITDA from Yahoo
+    # === BETTER DEFAULT MULTIPLE LOGIC ===
     real_ev_ebitda = st.session_state.get('ev_ebitda_actual')
-    
     if real_ev_ebitda and real_ev_ebitda > 0:
         def_mult = real_ev_ebitda
         st.caption(f"Used Market Multiple: {def_mult:.1f}x")
     else:
-        # Priority 2: Fallback to Margin Logic (but capped for safety)
-        if current_margin > 0.30: def_mult = 18.0 # Lowered from 25 to be safer
+        if current_margin > 0.30: def_mult = 18.0 
         elif current_margin < 0.10: def_mult = 8.0
         else: def_mult = 12.0
     
@@ -298,7 +295,7 @@ with st.sidebar:
     exit_mult = st.number_input("Exit Multiple (x)", value=def_mult * mult_e, step=0.5, format="%.1f", key=f"e_{ticker}_{scenario}")
 
 # ==========================================
-# 7. CALCULATION ENGINE
+# 7. CALCULATION ENGINE (SMART DECAY)
 # ==========================================
 years = range(1, 6)
 base_data = []
@@ -312,14 +309,26 @@ if r_in > 0:
     cap_r, dep_r, nwc_r = c_in/r_in, d_in/r_in, 0.02
     prev_rev = r_in
 
+    # --- SMART GROWTH LOGIC ---
+    # Fade growth rate slightly towards the terminal rate over 5 years
+    growth_decay_step = 0.0
+    if g_rev > safe_ltg:
+        target_y5_growth = (g_rev + safe_ltg) / 2 # Meet halfway
+        growth_decay_step = (g_rev - target_y5_growth) / 4 # Step down per year
+    
     for y in years:
-        rev = prev_rev * (1 + g_rev)
+        # Calculate dynamic growth rate for this specific year
+        current_g = g_rev - (growth_decay_step * (y - 1))
+        if current_g < safe_ltg: current_g = safe_ltg
+        
+        rev = prev_rev * (1 + current_g)
         ebit = rev * margin_tgt
         nopat = ebit * (1 - tax_rate)
         da, capex = rev * dep_r, rev * cap_r
         dnwc = (rev - prev_rev) * nwc_r
         fcff = nopat + da - capex - dnwc
         pv = fcff * ((1 + wacc)**-y)
+        
         base_data.append({'Year':y,'Revenue':rev,'EBIT':ebit,'NOPAT':nopat,'D&A':da,'Capex':capex,'FCFF':fcff,'PV':pv})
         prev_rev = rev
 else:
@@ -391,7 +400,6 @@ try:
     pv_tv_g = tv_g * ((1+wacc)**-5)
     
     # 2. H-MODEL (SMOOTHING) TV
-    # H = Half-life of the high growth period (assuming the next 5 years fade)
     h_period = 2.5
     fade_premium = (fcf5_final * h_period * (g_rev - safe_ltg)) / (wacc - safe_ltg)
     tv_h = tv_g + fade_premium
@@ -446,7 +454,7 @@ if cur_price > 0 and r_in > 0:
         main_color = "status-over" # Red
         rating_txt = "OVERVALUED"
 
-    # NOTE: The string below is flush-left to prevent Markdown from thinking it's a code block
+    # HTML Block: Left-Aligned to prevent Raw Code Display
     html_code = f"""
 <div class="glass-card">
 <div style="display:flex; justify-content: space-around; align-items: center; margin-bottom: 15px;">
@@ -590,11 +598,8 @@ with c_mc:
             sim_results = []
             
             # Create random distributions
-            # WACC varies by +/- 10% relative (e.g. 9% -> 8.1% to 9.9%)
             w_dist = np.random.normal(wacc, wacc*0.1, 1000) 
-            # Growth varies by +/- 20% relative
             g_dist = np.random.normal(g_rev, g_rev*0.2, 1000)
-            # Margin varies by +/- 10% relative
             m_dist = np.random.normal(margin_tgt, margin_tgt*0.1, 1000)
             
             for i in range(1000):
@@ -603,37 +608,34 @@ with c_mc:
                 m_sim = m_dist[i]
                 
                 # Fast DCF Logic (Simplified for speed)
-                # Note: We use the H-Model + Exit Multiple average for the sim
-                
-                # 1. Project FCF
-                rev_sim = r_in * ((1+g_sim)**5) # Approximation of Year 5 Rev
+                rev_sim = r_in * ((1+g_sim)**5) 
                 ebit_sim = rev_sim * m_sim
                 nopat_sim = ebit_sim * (1 - tax_rate)
                 
-                # Approximation: FCF conversion ratio based on Year 0
                 fcf_conv = (fcff0 / e_in) if e_in else 0.8
                 fcf5_sim = ebit_sim * fcf_conv
                 
-                # Discount Factors
                 df = (1 + w_sim)**-5
                 
-                # Terminal Values
-                safe_ltg_sim = min(ltg, w_sim - 0.01) # Safety check
+                safe_ltg_sim = min(ltg, w_sim - 0.01) 
                 tv_g_sim = fcf5_sim * (1+safe_ltg_sim)/(w_sim-safe_ltg_sim)
-                tv_e_sim = (ebit_sim + (rev_sim*dep_r)) * exit_mult # EBITDA approx
+                tv_e_sim = (ebit_sim + (rev_sim*dep_r)) * exit_mult 
                 
-                # Value
-                ev_sim = (fcf5_sim * 4) + (tv_g_sim * df * 0.5) + (tv_e_sim * df * 0.5) # Rough approximation
+                ev_sim = (fcf5_sim * 4) + (tv_g_sim * df * 0.5) + (tv_e_sim * df * 0.5) 
                 eq_sim = ev_sim - (debt_in - cash_in)
                 share_sim = eq_sim / shares_in
                 sim_results.append(share_sim)
             
-            # Plotting
+            # FIXED CHART: Use clean Numpy Bins instead of raw Interval objects
             sim_df = pd.DataFrame(sim_results, columns=["Price"])
-            # Remove outliers for chart readability
             sim_df = sim_df[(sim_df['Price'] > 0) & (sim_df['Price'] < cur_price * 4)]
             
-            st.bar_chart(sim_df['Price'].value_counts(bins=30).sort_index(), color="#60a5fa")
+            counts, bins = np.histogram(sim_df['Price'], bins=30)
+            # Create nice labels like "$100"
+            bin_mids = [f"{curr_symbol}{(bins[i]+bins[i+1])/2:.0f}" for i in range(len(bins)-1)]
+            
+            hist_df = pd.DataFrame({"Frequency": counts}, index=bin_mids)
+            st.bar_chart(hist_df, color="#60a5fa")
             
             p10 = np.percentile(sim_results, 10)
             p50 = np.percentile(sim_results, 50)
