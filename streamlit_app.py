@@ -101,7 +101,9 @@ def clean_currency(val, symbol="$"):
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_yahoo_data(ticker):
     try:
+        # Standard YF call (Let YF handle the session)
         tk = yf.Ticker(ticker)
+        
         try: info = tk.info
         except: info = {}
         if info is None: info = {}
@@ -126,6 +128,7 @@ def get_yahoo_data(ticker):
         actual_ev_ebitda = info.get('enterpriseToEbitda')
         beta_raw = info.get('beta')
         
+        # FIX: Fetch 10-Year Treasury Yield for WACC
         try:
             tnx = yf.Ticker("^TNX")
             rf_rate = tnx.fast_info.last_price
@@ -170,6 +173,8 @@ def get_yahoo_data(ticker):
         data['Capex'] = abs(get_val(cf, ['Capital Expenditure', 'Capital Expenditures'])) * factor
         data['Debt'] = get_val(bs, ['Total Debt', 'Long Term Debt']) * factor
         data['Cash'] = get_val(bs, ['Cash And Cash Equivalents']) * factor
+        
+        # WACC Specifics
         data['Interest'] = abs(get_val(inc, ['Interest Expense', 'Interest Expense Non Operating'])) * factor
         data['Beta'] = beta_raw if beta_raw else 1.0
         data['RiskFree'] = rf_rate
@@ -185,7 +190,8 @@ def get_yahoo_data(ticker):
 c_tick, c_space, c_pdf = st.columns([1, 4, 1], vertical_alignment="bottom")
 
 with c_tick:
-    ticker = st.text_input("Ticker", "NVDA").upper()
+    # CHANGED: Default is now EMPTY to prevent auto-fetch on load
+    ticker = st.text_input("Ticker", "").upper()
 
 pdf_spot = c_pdf.empty()
 
@@ -230,6 +236,10 @@ if ticker:
 
     if st.session_state.get('fx_msg'):
         st.info(f"💱 {st.session_state.fx_msg}")
+else:
+    st.info("👈 Enter a stock ticker (e.g. NVDA, AAPL) to begin analysis.")
+    shares_def = 1.0
+    cur_price = 0.0
 
 st.markdown("### Year 0: Base Financials (Millions)")
 with st.expander("Expand to edit Year 0 Data", expanded=True):
@@ -312,7 +322,6 @@ with st.sidebar:
         st.divider()
         st.write(f"**Calculated WACC: {calc_wacc_pct:.1f}%**")
         
-    # KEY FIX: Added reset_key to widget keys to force refresh on new stock load
     wacc = st.number_input("WACC %", value=float(f"{calc_wacc_pct:.1f}"), step=0.1, format="%.1f", key=f"w_{ticker}_{scenario}_{st.session_state.reset_key}") / 100
     
     st.divider()
@@ -333,7 +342,6 @@ with st.sidebar:
     elif current_margin < 0.10: def_growth = 3.0
     else: def_growth = 5.0
 
-    # KEY FIX: Reset Keys for all driver inputs
     g_rev = st.number_input("Revenue Growth %", value=def_growth * mult_g, step=0.5, format="%.1f", key=f"g_{ticker}_{scenario}_{st.session_state.reset_key}") / 100
     m_def = (current_margin * 100)
     margin_tgt = st.number_input("EBIT Margin %", value=float(f"{m_def * mult_m:.1f}"), step=0.5, format="%.1f", key=f"m_{ticker}_{scenario}_{st.session_state.reset_key}") / 100
@@ -346,7 +354,9 @@ with st.sidebar:
 # ==========================================
 years = range(1, 6)
 base_data = []
-safe_ltg = ltg if ltg < wacc else (wacc - 0.005)
+
+# FIX: Increased safety buffer to 1.5% to prevent infinite valuations
+safe_ltg = ltg if ltg < (wacc - 0.015) else (wacc - 0.015)
 
 if r_in > 0:
     nopat0 = e_in * (1 - tax_rate)
@@ -410,7 +420,7 @@ edited_df = st.data_editor(
 )
 
 # ==========================================
-# 9. VALUATION LOGIC & H-MODEL
+# 9. VALUATION LOGIC
 # ==========================================
 try:
     fcf_stream = []
@@ -437,14 +447,17 @@ try:
 
     sum_pv_final = sum(fcf_stream)
     
+    # 1. Gordon Growth TV (Standard)
     tv_g = fcf5_final * (1+safe_ltg)/(wacc-safe_ltg)
     pv_tv_g = tv_g * ((1+wacc)**-5)
     
-    h_period = 2.5
-    fade_premium = (fcf5_final * h_period * (g_rev - safe_ltg)) / (wacc - safe_ltg)
-    tv_h = tv_g + fade_premium
-    pv_tv_h = tv_h * ((1+wacc)**-5)
+    # 2. Conservative TV (Standard Gordon but with WACC + 1% cushion)
+    wacc_cons = wacc + 0.01
+    safe_ltg_cons = safe_ltg if safe_ltg < (wacc_cons - 0.015) else (wacc_cons - 0.015)
+    tv_c = fcf5_final * (1+safe_ltg_cons)/(wacc_cons-safe_ltg_cons)
+    pv_tv_c = tv_c * ((1+wacc)**-5)
     
+    # 3. Exit Multiple TV
     tv_e = ebitda5_final * exit_mult
     pv_tv_e = tv_e * ((1+wacc)**-5)
 
@@ -454,16 +467,16 @@ try:
         return (eq / shares_in) if shares_in > 0 else 0, ev
 
     p_g, ev_g = get_price(pv_tv_g)
-    p_h, ev_h = get_price(pv_tv_h)
+    p_c, ev_c = get_price(pv_tv_c)
     p_e, ev_e = get_price(pv_tv_e)
 
-    avg_int = (p_g + p_e + p_h) / 3 
+    avg_int = (p_g + p_e + p_c) / 3 
     if cur_price > 0: mos_pct = (avg_int - cur_price) / cur_price
     else: mos_pct = 0.0
 
 except Exception as e:
-    p_g, p_h, p_e, avg_int, mos_pct = 0,0,0,0,0
-    ev_g, ev_h, ev_e = 0,0,0
+    p_g, p_c, p_e, avg_int, mos_pct = 0,0,0,0,0
+    ev_g, ev_c, ev_e = 0,0,0
 
 # ==========================================
 # 10. RESULTS VISUALIZATION (FINAL PRO VERSION)
@@ -471,7 +484,7 @@ except Exception as e:
 st.divider()
 
 if cur_price > 0 and r_in > 0:
-    model_prices = [p_g, p_h, p_e]
+    model_prices = [p_g, p_c, p_e]
     min_val = min(model_prices) 
     max_val = max(model_prices) 
     
@@ -526,7 +539,7 @@ Conservative Upside: <strong>{mos_conservative:+.1%}</strong> &nbsp; | &nbsp; Ag
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-c_g, c_h, c_e = st.columns(3)
+c_g, c_c, c_e = st.columns(3)
 def make_bridge(pv_fcf, pv_tv, ev, debt, cash, eq):
     return pd.DataFrame({
         "Component": ["PV of 5y Cash Flows", "PV of Terminal", "Enterprise Value", "Less: Net Debt", "Equity Value"],
@@ -540,10 +553,10 @@ with c_g:
     st.markdown("##### Bridge (Gordon)", unsafe_allow_html=True)
     st.dataframe(make_bridge(sum_pv_final, pv_tv_g, ev_g, debt_in, cash_in, ev_g-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
 
-with c_h:
-    st.markdown(f"""<div class="val-card border-orange"><div class="val-title">H-Model Fade 📉</div><div class="val-sub">Linear fade from {g_rev:.1%} to {safe_ltg:.1%}</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-orange">{curr_symbol}{p_h:,.2f}</div><div class="val-ev"><span>EV: </span><strong>{curr_symbol}{ev_h:,.2f}M</strong></div></div>""", unsafe_allow_html=True)
-    st.markdown("##### Bridge (H-Model)", unsafe_allow_html=True)
-    st.dataframe(make_bridge(sum_pv_final, pv_tv_h, ev_h, debt_in, cash_in, ev_h-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
+with c_c:
+    st.markdown(f"""<div class="val-card border-orange"><div class="val-title">Conservative Case 🛡️</div><div class="val-sub">Higher Discount Rate (WACC + 1%)</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-orange">{curr_symbol}{p_c:,.2f}</div><div class="val-ev"><span>EV: </span><strong>{curr_symbol}{ev_c:,.2f}M</strong></div></div>""", unsafe_allow_html=True)
+    st.markdown("##### Bridge (Conservative)", unsafe_allow_html=True)
+    st.dataframe(make_bridge(sum_pv_final, pv_tv_c, ev_c, debt_in, cash_in, ev_c-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
 
 with c_e:
     st.markdown(f"""<div class="val-card border-green"><div class="val-title">Exit Multiple 💼</div><div class="val-sub">Based on {exit_mult}x EBITDA</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-green">{curr_symbol}{p_e:,.2f}</div><div class="val-ev"><span>EV: </span><strong>{curr_symbol}{ev_e:,.2f}M</strong></div></div>""", unsafe_allow_html=True)
