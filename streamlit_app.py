@@ -107,33 +107,26 @@ def get_yahoo_data(ticker):
         except: info = {}
         if info is None: info = {}
 
-        # 1. Market Data
         try: price = tk.fast_info.last_price
         except: 
             hist = tk.history(period="1d")
             price = hist['Close'].iloc[-1] if not hist.empty else 0.0
 
-        # === FIX: ROBUST SHARE COUNT LOGIC ===
-        # Priority 1: Direct Info
+        # === SHARE COUNT LOGIC ===
         shares = info.get('sharesOutstanding')
-        
-        # Priority 2: Fast Info
         if not shares:
             try: shares = tk.fast_info.shares_outstanding
             except: pass
             
-        # Priority 3: Calculate from Market Cap (Most Robust)
-        if not shares or shares < 1000: # Check for bad data
+        if not shares or shares < 1000:
             try:
                 mkt_cap = tk.fast_info.market_cap
                 if mkt_cap and price > 0:
                     shares = mkt_cap / price
             except: pass
             
-        # Final Fallback (with warning indicator in console)
-        if not shares: shares = 1e9 # 1 Billion default
-        
-        shares = shares / 1e6 # Convert to Millions
+        if not shares: shares = 1e9 
+        shares = shares / 1e6 
 
         industry = info.get('industry', 'Unknown')
         price_curr = info.get('currency', 'USD')
@@ -169,6 +162,13 @@ def get_yahoo_data(ticker):
         
         if inc.empty: raise ValueError("Yahoo Finance returned no data. You may be rate-limited.")
 
+        # === EXTRACT DATE FOR UI DISPLAY ===
+        try:
+            last_date_obj = inc.columns[0]
+            last_date_str = last_date_obj.strftime('%Y-%m-%d')
+        except:
+            last_date_str = "Latest Filing"
+
         def get_val(df, keys):
             if df.empty: return 0.0
             for k in keys:
@@ -190,10 +190,10 @@ def get_yahoo_data(ticker):
         data['Beta'] = beta_raw if beta_raw else 1.0
         data['RiskFree'] = rf_rate
         
-        return data, price, shares, fx_msg, price_curr, industry, actual_ev_ebitda
+        return data, price, shares, fx_msg, price_curr, industry, actual_ev_ebitda, last_date_str
         
     except Exception as e:
-        return None, 0.0, 1.0, f"Connection Error: {str(e)}", "USD", "Unknown", None
+        return None, 0.0, 1.0, f"Connection Error: {str(e)}", "USD", "Unknown", None, "Unknown"
 
 # ==========================================
 # 5. UI: INPUTS & SETUP
@@ -213,11 +213,12 @@ if 'reset_key' not in st.session_state:
 
 curr_symbol = "$"
 industry_name = "Unknown"
+last_filing_date = "Unknown"
 
 if ticker:
     with st.spinner(f"Analysing {ticker}..."):
         if 'last_ticker' not in st.session_state or st.session_state.last_ticker != ticker:
-            d, cur_price, shares_def, fx_msg, currency, ind_name, ev_ebitda = get_yahoo_data(ticker)
+            d, cur_price, shares_def, fx_msg, currency, ind_name, ev_ebitda, file_date = get_yahoo_data(ticker)
             if d:
                 st.session_state.y0 = d
                 st.session_state.last_price = cur_price
@@ -227,6 +228,7 @@ if ticker:
                 st.session_state.currency = currency
                 st.session_state.industry = ind_name
                 st.session_state.ev_ebitda_actual = ev_ebitda
+                st.session_state.file_date = file_date
                 st.session_state.reset_key += 1
             else:
                 st.error(f"Unable to fetch data: {fx_msg}")
@@ -236,13 +238,16 @@ if ticker:
                 st.session_state.currency = "USD"
                 st.session_state.industry = "Unknown"
                 st.session_state.ev_ebitda_actual = None
+                st.session_state.file_date = "Unknown"
         else:
             cur_price = st.session_state.last_price
             shares_def = st.session_state.last_shares
             fx_info = st.session_state.get('fx_msg', "")
             curr_code = st.session_state.get('currency', 'USD')
             industry_name = st.session_state.get('industry', 'Unknown')
+            file_date = st.session_state.get('file_date', "Unknown")
             curr_symbol = "€" if curr_code == 'EUR' else "£" if curr_code == 'GBP' else "¥" if curr_code in ['CNY','JPY'] else "$"
+            last_filing_date = file_date
 
     if st.session_state.get('fx_msg'):
         st.info(f"💱 {st.session_state.fx_msg}")
@@ -251,7 +256,10 @@ else:
     shares_def = 1.0
     cur_price = 0.0
 
-st.markdown("### Year 0: Base Financials (Millions)")
+# FIX: Added Date Display to Header
+date_display = st.session_state.get('file_date', 'Unknown')
+st.markdown(f"### Year 0: Base Financials (Ended {date_display})")
+
 with st.expander("Expand to edit Year 0 Data", expanded=True):
     with st.form("y0_form"):
         c1, c2, c3, c4 = st.columns(4)
@@ -322,6 +330,8 @@ with st.sidebar:
     
     calc_wacc = (w_e * cost_equity) + (w_d * cost_debt * (1 - tax_default))
     calc_wacc_pct = calc_wacc * 100
+    
+    if calc_wacc_pct < 6.0: calc_wacc_pct = 6.0
     
     with st.expander("Show WACC Calculation"):
         st.caption(f"Risk-Free Rate: {rf_in:.2f}%")
@@ -453,17 +463,24 @@ try:
         if y == 5:
             fcf5_final = fcff_recalc
             ebitda5_final = ebit_edit + da_edit
+            da5_final = da_edit # Save D&A for steady state calculation
 
     sum_pv_final = sum(fcf_stream)
     
-    tv_g = fcf5_final * (1+safe_ltg)/(wacc-safe_ltg)
+    # 1. Gordon Growth TV (Standard)
+    # FIX: Normalize Capex to 90% of D&A for Terminal Value (removes phantom cash flow)
+    fcf5_normalized = (ebitda5_final - da5_final) * (1-tax_rate) + da5_final - (da5_final * 0.95) 
+    
+    tv_g = fcf5_normalized * (1+safe_ltg)/(wacc-safe_ltg)
     pv_tv_g = tv_g * ((1+wacc)**-5)
     
+    # 2. Conservative TV (Standard Gordon but with WACC + 1% cushion)
     wacc_cons = wacc + 0.01
     safe_ltg_cons = safe_ltg if safe_ltg < (wacc_cons - 0.015) else (wacc_cons - 0.015)
-    tv_c = fcf5_final * (1+safe_ltg_cons)/(wacc_cons-safe_ltg_cons)
+    tv_c = fcf5_normalized * (1+safe_ltg_cons)/(wacc_cons-safe_ltg_cons)
     pv_tv_c = tv_c * ((1+wacc)**-5)
     
+    # 3. Exit Multiple TV
     tv_e = ebitda5_final * exit_mult
     pv_tv_e = tv_e * ((1+wacc)**-5)
 
