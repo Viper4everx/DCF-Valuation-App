@@ -114,7 +114,9 @@ def get_yahoo_data(ticker):
             price = hist['Close'].iloc[-1] if not hist.empty else 0.0
 
         # === FIX: ROBUST SHARE COUNT LOGIC ===
-        shares = info.get('sharesOutstanding')
+        shares = info.get('impliedSharesOutstanding')
+        if not shares: shares = info.get('sharesOutstanding')
+        
         if not shares:
             try: shares = tk.fast_info.shares_outstanding
             except: pass
@@ -163,7 +165,6 @@ def get_yahoo_data(ticker):
         
         if inc.empty: raise ValueError("Yahoo Finance returned no data. You may be rate-limited.")
 
-        # === EXTRACT DATE FOR UI DISPLAY ===
         try:
             last_date_obj = inc.columns[0]
             last_date_str = last_date_obj.strftime('%Y-%m-%d')
@@ -181,10 +182,17 @@ def get_yahoo_data(ticker):
         
         data['Revenue'] = get_val(inc, ['Total Revenue', 'Total Net Sales']) * factor
         data['EBIT']    = get_val(inc, ['Operating Income', 'EBIT']) * factor
+        data['PreTaxIncome'] = get_val(inc, ['Pretax Income']) * factor
+        data['TaxProvision'] = get_val(inc, ['Tax Provision']) * factor
+        
         data['Depreciation'] = get_val(cf, ['Depreciation And Amortization']) * factor
         if data['Depreciation'] == 0:
              data['Depreciation'] = get_val(inc, ['Reconciled Depreciation']) * factor
+             
         data['Capex'] = abs(get_val(cf, ['Capital Expenditure', 'Capital Expenditures'])) * factor
+        data['SBC'] = get_val(cf, ['Stock Based Compensation']) * factor
+        data['ChangeInWC'] = get_val(cf, ['Change In Working Capital', 'Changes In Cash']) * factor
+        
         data['Debt'] = get_val(bs, ['Total Debt', 'Long Term Debt']) * factor
         data['Cash'] = get_val(bs, ['Cash And Cash Equivalents']) * factor
         data['Interest'] = abs(get_val(inc, ['Interest Expense', 'Interest Expense Non Operating'])) * factor
@@ -207,7 +215,7 @@ with c_tick:
 pdf_spot = c_pdf.empty()
 
 if 'y0' not in st.session_state:
-    st.session_state.y0 = {k:0.0 for k in ['Revenue','EBIT','Depreciation','Capex','Debt','Cash','Interest','Beta','RiskFree']}
+    st.session_state.y0 = {k:0.0 for k in ['Revenue','EBIT','Depreciation','Capex','Debt','Cash','Interest','Beta','RiskFree','SBC','ChangeInWC','PreTaxIncome','TaxProvision']}
 
 if 'reset_key' not in st.session_state:
     st.session_state.reset_key = 0
@@ -262,16 +270,19 @@ st.markdown(f"### Year 0: Base Financials (Ended {date_display})")
 
 with st.expander("Expand to edit Year 0 Data", expanded=True):
     with st.form("y0_form"):
+        # ROW 1
         c1, c2, c3, c4 = st.columns(4)
-        r_in_str = c1.text_input("Revenue", value=fmt_comma(st.session_state.y0['Revenue']))
-        e_in_str = c2.text_input("EBIT", value=fmt_comma(st.session_state.y0['EBIT']))
-        d_in_str = c3.text_input("D&A", value=fmt_comma(st.session_state.y0['Depreciation']))
-        c_in_str = c4.text_input("Capex", value=fmt_comma(st.session_state.y0['Capex']))
+        r_in_str = c1.text_input("Revenue", value=fmt_comma(st.session_state.y0.get('Revenue', 0)))
+        e_in_str = c2.text_input("EBIT", value=fmt_comma(st.session_state.y0.get('EBIT', 0)))
+        d_in_str = c3.text_input("D&A", value=fmt_comma(st.session_state.y0.get('Depreciation', 0)))
+        c_in_str = c4.text_input("Capex", value=fmt_comma(st.session_state.y0.get('Capex', 0)))
         
-        c5, c6, c7 = st.columns(3)
-        debt_in_str = c5.text_input("Total Debt", value=fmt_comma(st.session_state.y0['Debt']))
-        cash_in_str = c6.text_input("Total Cash", value=fmt_comma(st.session_state.y0['Cash']))
-        shares_in_str = c7.text_input("Shares (Millions)", value=fmt_comma(shares_def))
+        # ROW 2
+        c5, c6, c7, c8 = st.columns(4)
+        debt_in_str = c5.text_input("Total Debt", value=fmt_comma(st.session_state.y0.get('Debt', 0)))
+        cash_in_str = c6.text_input("Total Cash", value=fmt_comma(st.session_state.y0.get('Cash', 0)))
+        shares_in_str = c7.text_input("Diluted Shares", value=fmt_comma(shares_def))
+        sbc_in_str = c8.text_input("Stock Based Comp", value=fmt_comma(st.session_state.y0.get('SBC', 0)))
         
         # Convert back to float
         r_in = clean_currency(r_in_str, curr_symbol)
@@ -281,6 +292,7 @@ with st.expander("Expand to edit Year 0 Data", expanded=True):
         debt_in = clean_currency(debt_in_str, curr_symbol)
         cash_in = clean_currency(cash_in_str, curr_symbol)
         shares_in = clean_currency(shares_in_str, curr_symbol)
+        sbc_in = clean_currency(sbc_in_str, curr_symbol)
         if shares_in == 0: shares_in = 1.0
         
         st.form_submit_button("Update Model")
@@ -326,9 +338,16 @@ with st.sidebar:
     if total_cap <= 0: total_cap = 1.0
     w_e = equity_val / total_cap
     w_d = debt_val / total_cap
-    tax_default = 0.21
     
-    calc_wacc = (w_e * cost_equity) + (w_d * cost_debt * (1 - tax_default))
+    pre_tax = st.session_state.y0.get('PreTaxIncome', 0)
+    tax_prov = st.session_state.y0.get('TaxProvision', 0)
+    if pre_tax > 0 and tax_prov > 0:
+        eff_tax_rate = (tax_prov / pre_tax)
+        if eff_tax_rate > 0.40 or eff_tax_rate < 0.05: eff_tax_rate = 0.21 
+    else:
+        eff_tax_rate = 0.21
+    
+    calc_wacc = (w_e * cost_equity) + (w_d * cost_debt * (1 - eff_tax_rate))
     calc_wacc_pct = calc_wacc * 100
     
     if calc_wacc_pct < 6.0: calc_wacc_pct = 6.0
@@ -337,7 +356,7 @@ with st.sidebar:
         st.caption(f"Risk-Free Rate: {rf_in:.2f}%")
         st.caption(f"Beta: {beta_in:.2f}")
         st.caption(f"Cost of Equity: {cost_equity:.1%}")
-        st.caption(f"Cost of Debt (After Tax): {cost_debt*(1-tax_default):.1%}")
+        st.caption(f"Cost of Debt (After Tax): {cost_debt*(1-eff_tax_rate):.1%}")
         st.caption(f"Weight: {w_e:.0%} Eq / {w_d:.0%} Dbt")
         st.divider()
         st.write(f"**Calculated WACC: {calc_wacc_pct:.1f}%**")
@@ -365,9 +384,11 @@ with st.sidebar:
     g_rev = st.number_input("Revenue Growth %", value=def_growth * mult_g, step=0.5, format="%.1f", key=f"g_{ticker}_{scenario}_{st.session_state.reset_key}") / 100
     m_def = (current_margin * 100)
     margin_tgt = st.number_input("EBIT Margin %", value=float(f"{m_def * mult_m:.1f}"), step=0.5, format="%.1f", key=f"m_{ticker}_{scenario}_{st.session_state.reset_key}") / 100
-    tax_rate = st.number_input("Tax Rate %", value=21.0, step=1.0, format="%.1f", key=f"t_{ticker}_{scenario}_{st.session_state.reset_key}") / 100
+    tax_rate = st.number_input("Tax Rate %", value=float(f"{eff_tax_rate*100:.1f}"), step=1.0, format="%.1f", key=f"t_{ticker}_{scenario}_{st.session_state.reset_key}") / 100
     ltg = st.number_input("Terminal Growth %", value=2.5, step=0.1, format="%.1f", key=f"l_{ticker}_{scenario}_{st.session_state.reset_key}") / 100
     exit_mult = st.number_input("Exit Multiple (x)", value=def_mult * mult_e, step=0.5, format="%.1f", key=f"e_{ticker}_{scenario}_{st.session_state.reset_key}")
+    
+    term_cap_ratio = st.slider("Terminal Capex / D&A", 0.5, 1.5, 1.0, 0.1, help="1.0 means Capex matches Depreciation")
 
 # ==========================================
 # 7. CALCULATION ENGINE (SMART DECAY)
@@ -379,10 +400,19 @@ safe_ltg = ltg if ltg < (wacc - 0.015) else (wacc - 0.015)
 
 if r_in > 0:
     nopat0 = e_in * (1 - tax_rate)
-    fcff0 = nopat0 + d_in - c_in
+    
+    real_nwc = st.session_state.y0.get('ChangeInWC', 0)
+    fcff0 = nopat0 + d_in - c_in + real_nwc + sbc_in 
+    
     base_data.append({'Year': 0, 'Revenue': r_in, 'EBIT': e_in, 'NOPAT': nopat0, 'D&A': d_in, 'Capex': c_in, 'FCFF': fcff0, 'PV': 0.0})
 
-    cap_r, dep_r, nwc_r = c_in/r_in, d_in/r_in, 0.02
+    cap_r, dep_r = c_in/r_in, d_in/r_in
+    nwc_r = (real_nwc / r_in) if r_in != 0 else 0.0
+    if nwc_r > 0.05: nwc_r = 0.05
+    if nwc_r < -0.05: nwc_r = -0.05
+    
+    sbc_r = (sbc_in / r_in) if r_in != 0 else 0.0
+
     prev_rev = r_in
 
     growth_decay_step = 0.0
@@ -399,8 +429,11 @@ if r_in > 0:
         nopat = ebit * (1 - tax_rate)
         da, capex = rev * dep_r, rev * cap_r
         dnwc = (rev - prev_rev) * nwc_r
-        fcff = nopat + da - capex - dnwc
-        pv = fcff * ((1 + wacc)**-y)
+        sbc_proj = rev * sbc_r
+        
+        fcff = nopat + da - capex - dnwc + sbc_proj
+        
+        pv = fcff * ((1 + wacc)**-(y - 0.5))
         
         base_data.append({'Year':y,'Revenue':rev,'EBIT':ebit,'NOPAT':nopat,'D&A':da,'Capex':capex,'FCFF':fcff,'PV':pv})
         prev_rev = rev
@@ -452,35 +485,34 @@ try:
         
         prev_col = f"Year {y-1}"
         rev_prev = clean_currency(edited_df.loc['Revenue', prev_col], curr_symbol)
-        dnwc = (rev_edit - rev_prev) * 0.02
+        dnwc = (rev_edit - rev_prev) * nwc_r
+        sbc_proj = rev_edit * sbc_r
         
         nopat = ebit_edit * (1 - tax_rate)
-        fcff_recalc = nopat + da_edit - capex_edit - dnwc
+        fcff_recalc = nopat + da_edit - capex_edit - dnwc + sbc_proj
         
-        pv_recalc = fcff_recalc * ((1 + wacc)**-y)
+        pv_recalc = fcff_recalc * ((1 + wacc)**-(y - 0.5))
         fcf_stream.append(pv_recalc)
         
         if y == 5:
             fcf5_final = fcff_recalc
             ebitda5_final = ebit_edit + da_edit
-            da5_final = da_edit # Save D&A for steady state calculation
+            da5_final = da_edit 
 
     sum_pv_final = sum(fcf_stream)
     
-    # 1. Gordon Growth TV (Standard)
-    # FIX: Normalize Capex to 90% of D&A for Terminal Value (removes phantom cash flow)
-    fcf5_normalized = (ebitda5_final - da5_final) * (1-tax_rate) + da5_final - (da5_final * 0.95) 
+    term_nopat = ebitda5_final * (1 - tax_rate)
+    term_capex = da5_final * term_cap_ratio
+    fcf5_normalized = (ebitda5_final - da5_final)*(1-tax_rate) + da5_final - term_capex
     
     tv_g = fcf5_normalized * (1+safe_ltg)/(wacc-safe_ltg)
     pv_tv_g = tv_g * ((1+wacc)**-5)
     
-    # 2. Conservative TV (Standard Gordon but with WACC + 1% cushion)
     wacc_cons = wacc + 0.01
     safe_ltg_cons = safe_ltg if safe_ltg < (wacc_cons - 0.015) else (wacc_cons - 0.015)
     tv_c = fcf5_normalized * (1+safe_ltg_cons)/(wacc_cons-safe_ltg_cons)
     pv_tv_c = tv_c * ((1+wacc)**-5)
     
-    # 3. Exit Multiple TV
     tv_e = ebitda5_final * exit_mult
     pv_tv_e = tv_e * ((1+wacc)**-5)
 
@@ -502,7 +534,7 @@ except Exception as e:
     ev_g, ev_c, ev_e = 0,0,0
 
 # ==========================================
-# 10. RESULTS VISUALIZATION (FINAL PRO VERSION)
+# 10. RESULTS VISUALIZATION
 # ==========================================
 st.divider()
 
@@ -514,13 +546,12 @@ if cur_price > 0 and r_in > 0:
     mos_conservative = (min_val - cur_price) / cur_price
     mos_aggressive = (max_val - cur_price) / cur_price
     
-    # === NEW: SMARTER RATING LOGIC ===
     if mos_conservative > 0:
         main_color = "status-under"
         rating_txt = "STRONG BUY (Safe)"
-    elif mos_pct > 0.20: # If Average Upside > 20%
+    elif mos_pct > 0.20: 
         main_color = "status-under"
-        rating_txt = "STRONG BUY"
+        rating_txt = "STRONG BUY (High Upside)"
     elif mos_pct > 0:
         main_color = "text-orange"
         rating_txt = "MODERATE BUY"
@@ -605,7 +636,11 @@ with c_sens:
     def quick_dcf_calc(w, t_g):
         cap_r = c_in/r_in if r_in else 0
         dep_r = d_in/r_in if r_in else 0
-        nwc_r = 0.02
+        nwc_r = (st.session_state.y0.get('ChangeInWC',0) / r_in) if r_in else 0
+        if nwc_r > 0.05: nwc_r = 0.05
+        if nwc_r < -0.05: nwc_r = -0.05
+        sbc_r = (st.session_state.y0.get('SBC',0) / r_in) if r_in else 0
+        
         fcf_pv_sum = 0.0
         prev_rev = r_in
         last_fcf = 0.0
@@ -618,8 +653,10 @@ with c_sens:
             da = rev * dep_r
             capex = rev * cap_r
             dnwc = (rev - prev_rev) * nwc_r
-            fcff = nopat + da - capex - dnwc
-            pv = fcff * ((1 + w)**-y)
+            sbc_proj = rev * sbc_r
+            
+            fcff = nopat + da - capex - dnwc + sbc_proj
+            pv = fcff * ((1 + w)**-(y-0.5))
             fcf_pv_sum += pv
             prev_rev = rev
             if y == 5:
@@ -661,37 +698,56 @@ with c_sens:
     st.dataframe(df_sens.style.format(f"{curr_symbol}{{:,.2f}}").map(style_sens), use_container_width=True)
 
 # ==========================================
-# 12. MONTE CARLO SIMULATION
+# 12. MONTE CARLO SIMULATION (ENHANCED)
 # ==========================================
 with c_mc:
     st.subheader("Monte Carlo Simulation 🎲")
     st.caption(f"Running randomized scenarios to find probability.")
     
-    sim_count = st.slider("Number of Simulations", 1000, 10000, 1000, step=1000)
+    sim_count = st.slider("Number of Simulations", 1000, 10000, 2000, step=1000)
     
     if st.button("Run Simulation", use_container_width=True):
         with st.spinner("Simulating..."):
-            np.random.seed(42) # Reproducible results
+            np.random.seed(42) 
             sim_results = []
             
-            # Create random distributions
-            w_dist = np.random.normal(wacc, wacc*0.1, sim_count) 
-            g_dist = np.random.normal(g_rev, g_rev*0.2, sim_count)
-            m_dist = np.random.normal(margin_tgt, margin_tgt*0.1, sim_count)
+            # FIX 9: Multivariate Normal Distribution (Correlation)
+            means = [g_rev, margin_tgt, wacc]
+            # Standard Deviations
+            sig_g = g_rev * 0.2
+            sig_m = margin_tgt * 0.15
+            sig_w = wacc * 0.1
+            
+            # Correlation Coefficients
+            rho_gm = -0.3 # Growth vs Margin (High growth = spend more = lower margin)
+            rho_gw = 0.1  # Growth vs WACC (High growth = higher risk)
+            rho_mw = 0.05 # Margin vs WACC
+            
+            # Covariance Matrix
+            cov_matrix = [
+                [sig_g**2,              rho_gm*sig_g*sig_m,    rho_gw*sig_g*sig_w],
+                [rho_gm*sig_g*sig_m,    sig_m**2,              rho_mw*sig_m*sig_w],
+                [rho_gw*sig_g*sig_w,    rho_mw*sig_m*sig_w,    sig_w**2]
+            ]
+            
+            # Draw correlated samples
+            draws = np.random.multivariate_normal(means, cov_matrix, sim_count)
+            
+            # Clipping to prevent unrealistic outliers
+            draws[:, 1] = np.clip(draws[:, 1], 0.01, 0.60) # Margin [1% - 60%]
             
             for i in range(sim_count):
-                w_sim = w_dist[i]
-                g_sim = g_dist[i]
-                m_sim = m_dist[i]
+                g_sim = draws[i, 0]
+                m_sim = draws[i, 1]
+                w_sim = draws[i, 2]
                 
-                # Fast DCF Logic (Simplified for speed)
-                # Full Fidelity Loop inside sim to match accuracy preference
                 pv_sum = 0.0
                 prev_rev_sim = r_in
                 
-                growth_decay_step_sim = 0.0
+                # Hard Clip Terminal Growth to be strictly less than WACC
                 safe_ltg_sim = min(ltg, w_sim - 0.015)
                 
+                growth_decay_step_sim = 0.0
                 if g_sim > safe_ltg_sim:
                     target_y5 = (g_sim + safe_ltg_sim) / 2
                     growth_decay_step_sim = (g_sim - target_y5) / 4
@@ -713,11 +769,12 @@ with c_mc:
                     
                     da_sim = rev_sim * da_ratio
                     capex_sim = rev_sim * cap_ratio
-                    dnwc_sim = (rev_sim - prev_rev_sim) * 0.02
+                    dnwc_sim = (rev_sim - prev_rev_sim) * nwc_r
+                    sbc_sim = rev_sim * sbc_r
                     
-                    fcff_sim = nopat_sim + da_sim - capex_sim - dnwc_sim
+                    fcff_sim = nopat_sim + da_sim - capex_sim - dnwc_sim + sbc_sim
                     
-                    pv_sim = fcff_sim * ((1 + w_sim)**-y)
+                    pv_sim = fcff_sim * ((1 + w_sim)**-(y-0.5))
                     pv_sum += pv_sim
                     prev_rev_sim = rev_sim
                     
@@ -727,8 +784,8 @@ with c_mc:
                         da5_sim = da_sim
                 
                 # Terminal Values
-                # 1. Normalize Capex
-                fcf5_norm_sim = (ebitda5_sim - da5_sim)*(1-tax_rate) + da5_sim - (da5_sim * 0.95)
+                term_capex_sim = da5_sim * term_cap_ratio
+                fcf5_norm_sim = (ebitda5_sim - da5_sim)*(1-tax_rate) + da5_sim - term_capex_sim
                 
                 tv_g_sim = fcf5_norm_sim * (1+safe_ltg_sim)/(w_sim-safe_ltg_sim)
                 pv_tv_g_sim = tv_g_sim * ((1+w_sim)**-5)
@@ -752,12 +809,10 @@ with c_mc:
                 avg_share_price = (share_g + share_c + share_e) / 3
                 sim_results.append(avg_share_price)
             
-            # FIXED CHART: Use clean Numpy Bins instead of raw Interval objects
             sim_df = pd.DataFrame(sim_results, columns=["Price"])
             sim_df = sim_df[(sim_df['Price'] > 0) & (sim_df['Price'] < cur_price * 4)]
             
             counts, bins = np.histogram(sim_df['Price'], bins=30)
-            # Create nice labels like "$100"
             bin_mids = [f"{curr_symbol}{(bins[i]+bins[i+1])/2:.0f}" for i in range(len(bins)-1)]
             
             hist_df = pd.DataFrame({"Frequency": counts}, index=bin_mids)
