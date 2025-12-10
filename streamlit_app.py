@@ -289,7 +289,7 @@ else:
 date_display = st.session_state.get('file_date', 'Unknown')
 st.markdown(f"### Year 0: Base Financials (Ended {date_display})")
 
-with st.expander("Expand to edit Year 0 Data", expanded=True):
+with st.expander("Expand to edit Year 0 Data (Yahoo Imported)", expanded=True):
     with st.form("y0_form"):
         # ROW 1
         c1, c2, c3, c4 = st.columns(4)
@@ -305,6 +305,10 @@ with st.expander("Expand to edit Year 0 Data", expanded=True):
         shares_in_str = c7.text_input("Diluted Shares", value=fmt_comma(shares_def))
         sbc_in_str = c8.text_input("Stock Based Comp", value=fmt_comma(st.session_state.y0.get('SBC', 0)))
         
+        # ROW 3 - ADDED EXPLICIT NWC EDIT
+        st.caption("Change in Working Capital (Year 0 from Cash Flow Statement)")
+        nwc_in_str = st.text_input("Change in NWC", value=fmt_comma(st.session_state.y0.get('ChangeInWC', 0)))
+        
         # Convert back to float
         r_in = clean_currency(r_in_str, curr_symbol)
         e_in = clean_currency(e_in_str, curr_symbol)
@@ -314,9 +318,12 @@ with st.expander("Expand to edit Year 0 Data", expanded=True):
         cash_in = clean_currency(cash_in_str, curr_symbol)
         shares_in = clean_currency(shares_in_str, curr_symbol)
         sbc_in = clean_currency(sbc_in_str, curr_symbol)
+        nwc_in = clean_currency(nwc_in_str, curr_symbol)
+        
         if shares_in == 0: shares_in = 1.0
         
-        st.form_submit_button("Update Model")
+        if st.form_submit_button("Update Model"):
+            st.session_state.y0['ChangeInWC'] = nwc_in
 
 # ==========================================
 # 6. SCENARIO & DRIVERS (SIDEBAR)
@@ -418,10 +425,27 @@ with st.sidebar:
     cap_r = c_in/r_in if r_in > 0 else 0
     dep_r = d_in/r_in if r_in > 0 else 0
     
-    real_nwc = st.session_state.y0.get('ChangeInWC', 0)
-    nwc_r = (real_nwc / r_in) if r_in > 0 else 0.0
-    if nwc_r > 0.05: nwc_r = 0.05
-    if nwc_r < -0.05: nwc_r = -0.05
+    # NEW NWC LOGIC
+    st.markdown("---")
+    st.markdown("**Working Capital**")
+    
+    real_nwc_y0 = nwc_in # From the form above
+    
+    # Calculate what % of revenue the current NWC change represents (as a proxy)
+    # Ideally NWC is % of Change in Revenue.
+    # If Rev Change is 0, we can't div by 0, so we default to 0.
+    
+    # Defaulting the slider:
+    # If Y0 NWC is 0, default 0%. If it exists, check ratio vs last year revenue (approx).
+    # Since we don't have Y-1 revenue easily, we use current Revenue as a proxy base
+    # or just set a safe default if the math is weird.
+    
+    default_nwc_pct = (real_nwc_y0 / r_in * 100) if r_in != 0 else 0.0
+    if default_nwc_pct > 20: default_nwc_pct = 5.0 # Clamp outliers for default
+    if default_nwc_pct < -20: default_nwc_pct = -5.0
+    
+    nwc_driver_pct = st.number_input("NWC % of Change in Rev", value=float(f"{default_nwc_pct:.2f}"), step=0.5, help="Controls automatic NWC calculation. Positive = Cash Outflow (Investment in WC)")
+    nwc_r = nwc_driver_pct / 100
     
     sbc_r = (sbc_in / r_in) if r_in > 0 else 0.0
 
@@ -435,9 +459,10 @@ safe_ltg = ltg if ltg < (wacc - 0.015) else (wacc - 0.015)
 
 if r_in > 0:
     nopat0 = e_in * (1 - tax_rate)
-    fcff0 = nopat0 + d_in - c_in + real_nwc + sbc_in 
+    # Year 0 Change in WC comes from statement (nwc_in)
+    fcff0 = nopat0 + d_in - c_in + nwc_in + sbc_in 
     
-    base_data.append({'Year': 0, 'Revenue': r_in, 'EBIT': e_in, 'NOPAT': nopat0, 'D&A': d_in, 'Capex': c_in, 'FCFF': fcff0, 'PV': 0.0})
+    base_data.append({'Year': 0, 'Revenue': r_in, 'EBIT': e_in, 'NOPAT': nopat0, 'D&A': d_in, 'Capex': c_in, 'Change in NWC': nwc_in, 'FCFF': fcff0, 'PV': 0.0})
 
     prev_rev = r_in
 
@@ -457,18 +482,22 @@ if r_in > 0:
         # Use Global Ratios
         da = rev * dep_r
         capex = rev * cap_r
+        
+        # AUTO CALCULATE NWC based on Sidebar Driver
         dnwc = (rev - prev_rev) * nwc_r
+        
         sbc_proj = rev * sbc_r
         
         fcff = nopat + da - capex - dnwc + sbc_proj
         
-        # FIX 5: Mid-year discount
+        # Mid-year discount
         pv = fcff * ((1 + wacc)**-(y - 0.5))
         
-        base_data.append({'Year':y,'Revenue':rev,'EBIT':ebit,'NOPAT':nopat,'D&A':da,'Capex':capex,'FCFF':fcff,'PV':pv})
+        # ADDED 'Change in NWC' to the dataframe
+        base_data.append({'Year':y,'Revenue':rev,'EBIT':ebit,'NOPAT':nopat,'D&A':da,'Capex':capex, 'Change in NWC': dnwc, 'FCFF':fcff,'PV':pv})
         prev_rev = rev
 else:
-    for y in range(0, 6): base_data.append({'Year':y,'Revenue':0.0,'EBIT':0.0,'NOPAT':0.0,'D&A':0.0,'Capex':0.0,'FCFF':0.0,'PV':0.0})
+    for y in range(0, 6): base_data.append({'Year':y,'Revenue':0.0,'EBIT':0.0,'NOPAT':0.0,'D&A':0.0,'Capex':0.0,'Change in NWC':0.0,'FCFF':0.0,'PV':0.0})
 
 df_base = pd.DataFrame(base_data).set_index('Year')
 
@@ -513,15 +542,21 @@ try:
         da_edit = clean_currency(edited_df.loc['D&A', col_name], curr_symbol)
         capex_edit = clean_currency(edited_df.loc['Capex', col_name], curr_symbol)
         
-        prev_col = f"Year {y-1}"
-        rev_prev = clean_currency(edited_df.loc['Revenue', prev_col], curr_symbol)
-        
-        dnwc = (rev_edit - rev_prev) * nwc_r
+        # FIX: READ NWC from Editor (allows Manual Adjustment)
+        # If the user edited the table, this value takes precedence over the formula.
+        try:
+            dnwc_read = clean_currency(edited_df.loc['Change in NWC', col_name], curr_symbol)
+            dnwc_final = dnwc_read
+        except:
+            prev_col = f"Year {y-1}"
+            rev_prev = clean_currency(edited_df.loc['Revenue', prev_col], curr_symbol)
+            dnwc_final = (rev_edit - rev_prev) * nwc_r
+
         sbc_proj = rev_edit * sbc_r
         
         nopat = ebit_edit * (1 - tax_rate)
         # Recalc FCF
-        fcff_recalc = nopat + da_edit - capex_edit - dnwc + sbc_proj
+        fcff_recalc = nopat + da_edit - capex_edit - dnwc_final + sbc_proj
         
         # Mid-year discount
         pv_recalc = fcff_recalc * ((1 + wacc)**-(y - 0.5))
@@ -682,6 +717,7 @@ with c_sens:
             nopat = ebit * (1 - tax_rate)
             da = rev * dep_r
             capex = rev * cap_r
+            # Fix Sensitivity to use same NWC driver
             dnwc = (rev - prev_rev) * nwc_r
             sbc_proj = rev * sbc_r
             
@@ -797,7 +833,10 @@ with c_mc:
                     # Use Global Ratios
                     da_sim = rev_sim * dep_r
                     capex_sim = rev_sim * cap_r
+                    
+                    # SIMULATE NWC
                     dnwc_sim = (rev_sim - prev_rev_sim) * nwc_r
+                    
                     sbc_sim = rev_sim * sbc_r
                     
                     fcff_sim = nopat_sim + da_sim - capex_sim - dnwc_sim + sbc_sim
