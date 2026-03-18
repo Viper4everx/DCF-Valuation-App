@@ -134,6 +134,7 @@ def get_yahoo_data(ticker):
         shares = shares / 1e6 
 
         industry = info.get('industry', 'Unknown')
+        company_name = info.get('shortName') or info.get('longName') or ticker
         price_curr = info.get('currency', 'USD')
         fin_curr = info.get('financialCurrency', price_curr)
         
@@ -220,10 +221,113 @@ def get_yahoo_data(ticker):
         elif country not in ['United States', 'Canada', 'United Kingdom', 'Germany', 'France', 'Japan']: country_risk = 1.0
         data['CountryRisk'] = country_risk
         
-        return data, price, shares, fx_msg, price_curr, industry, actual_ev_ebitda, last_date_str
+        # ==========================================
+        # HISTORICAL FINANCIALS (last 4 years)
+        # ==========================================
+        hist_data = []
+        try:
+            def get_series(df, keys):
+                for k in keys:
+                    if k in df.index:
+                        return df.loc[k]
+                return pd.Series(dtype=float)
+
+            rev_series  = get_series(inc, ['Total Revenue', 'Total Net Sales'])
+            ebit_series = get_series(inc, ['Operating Income', 'EBIT'])
+            da_series_cf = get_series(cf, ['Depreciation And Amortization'])
+            capex_series = get_series(cf, ['Capital Expenditure', 'Capital Expenditures'])
+            sbc_series  = get_series(cf, ['Stock Based Compensation'])
+            nwc_series  = get_series(cf, ['Change In Working Capital'])
+            tax_series  = get_series(inc, ['Tax Provision'])
+            pretax_series = get_series(inc, ['Pretax Income'])
+
+            for col in inc.columns[:4]:   # up to 4 years
+                try:
+                    yr_label = col.strftime('%Y') if hasattr(col, 'strftime') else str(col)
+                    rev_v  = float(rev_series.get(col, 0) or 0) * factor
+                    ebit_v = float(ebit_series.get(col, 0) or 0) * factor
+                    da_v   = float(da_series_cf.get(col, 0) or 0) * factor
+                    cap_v  = abs(float(capex_series.get(col, 0) or 0)) * factor
+                    sbc_v  = float(sbc_series.get(col, 0) or 0) * factor
+                    nwc_v  = float(nwc_series.get(col, 0) or 0) * factor
+                    tax_v  = float(tax_series.get(col, 0) or 0) * factor
+                    pt_v   = float(pretax_series.get(col, 0) or 0) * factor
+                    ebit_margin = (ebit_v / rev_v * 100) if rev_v else 0.0
+                    tr = (tax_v / pt_v) if pt_v > 0 else 0.21
+                    tr = min(max(tr, 0.05), 0.40)
+                    nopat_v = ebit_v * (1 - tr)
+                    fcff_v = nopat_v + da_v - cap_v + nwc_v + sbc_v
+                    hist_data.append({
+                        'Year': yr_label,
+                        'Revenue': rev_v,
+                        'EBIT Margin %': round(ebit_margin, 1),
+                        'D&A': da_v,
+                        'Capex': cap_v,
+                        'SBC': sbc_v,
+                        'FCFF': fcff_v,
+                    })
+                except Exception:
+                    pass
+            hist_data = list(reversed(hist_data))  # oldest → newest
+        except Exception:
+            hist_data = []
+
+        # ==========================================
+        # COMPARABLES: sector peers from Yahoo
+        # ==========================================
+        comp_data = []
+        try:
+            sector = info.get('sector', '')
+            # Yahoo provides a list of similar companies via recommendations
+            recs = tk.recommendations
+            peer_tickers = []
+            if recs is not None and not recs.empty:
+                if 'symbol' in recs.columns:
+                    peer_tickers = recs['symbol'].dropna().unique().tolist()[:6]
+                elif 'toGrade' in recs.columns:
+                    pass
+            # Fallback: use a small hard-coded sector map
+            if not peer_tickers:
+                sector_peers = {
+                    'Technology': ['MSFT','GOOGL','META','AMZN','AAPL'],
+                    'Consumer Cyclical': ['AMZN','TSLA','HD','MCD','NKE'],
+                    'Healthcare': ['JNJ','UNH','PFE','ABBV','MRK'],
+                    'Financial Services': ['JPM','BAC','WFC','GS','MS'],
+                    'Energy': ['XOM','CVX','COP','SLB','EOG'],
+                    'Industrials': ['HON','UPS','CAT','DE','RTX'],
+                    'Communication Services': ['GOOGL','META','NFLX','DIS','T'],
+                    'Consumer Defensive': ['PG','KO','PEP','WMT','COST'],
+                    'Utilities': ['NEE','DUK','SO','D','AEP'],
+                    'Real Estate': ['AMT','PLD','CCI','EQIX','SPG'],
+                    'Basic Materials': ['LIN','APD','ECL','NEM','FCX'],
+                }
+                peer_tickers = [t for t in sector_peers.get(sector, ['SPY','QQQ','IWM','VTI','DIA']) if t != ticker][:5]
+
+            for pt in peer_tickers[:5]:
+                try:
+                    pi = yf.Ticker(pt).info
+                    if pi is None: continue
+                    ev_eb = pi.get('enterpriseToEbitda')
+                    pe    = pi.get('trailingPE')
+                    name  = pi.get('shortName', pt)[:20]
+                    mktcap = pi.get('marketCap', 0) or 0
+                    if ev_eb and not np.isnan(float(ev_eb)) and float(ev_eb) > 0:
+                        comp_data.append({
+                            'Ticker': pt,
+                            'Name': name,
+                            'EV/EBITDA': round(float(ev_eb), 1),
+                            'P/E': round(float(pe), 1) if pe and not np.isnan(float(pe)) else None,
+                            'Mkt Cap $B': round(mktcap / 1e9, 1) if mktcap else None,
+                        })
+                except Exception:
+                    pass
+        except Exception:
+            comp_data = []
+
+        return data, price, shares, fx_msg, price_curr, industry, actual_ev_ebitda, last_date_str, hist_data, comp_data, company_name
         
     except Exception as e:
-        return None, 0.0, 1.0, f"Connection Error: {str(e)}", "USD", "Unknown", None, "Unknown"
+        return None, 0.0, 1.0, f"Connection Error: {str(e)}", "USD", "Unknown", None, "Unknown", [], [], ""
 
 # ==========================================
 # 5. UI: INPUTS & SETUP
@@ -241,6 +345,12 @@ if 'y0' not in st.session_state:
 if 'reset_key' not in st.session_state:
     st.session_state.reset_key = 0
 
+if 'hist_data' not in st.session_state:
+    st.session_state.hist_data = []
+
+if 'comp_data' not in st.session_state:
+    st.session_state.comp_data = []
+
 curr_symbol = "$"
 industry_name = "Unknown"
 last_filing_date = "Unknown"
@@ -248,7 +358,7 @@ last_filing_date = "Unknown"
 if ticker:
     with st.spinner(f"Analysing {ticker}..."):
         if 'last_ticker' not in st.session_state or st.session_state.last_ticker != ticker:
-            d, cur_price, shares_def, fx_msg, currency, ind_name, ev_ebitda, file_date = get_yahoo_data(ticker)
+            d, cur_price, shares_def, fx_msg, currency, ind_name, ev_ebitda, file_date, hist_data, comp_data, company_name = get_yahoo_data(ticker)
             if d:
                 st.session_state.y0 = d
                 st.session_state.last_price = cur_price
@@ -259,6 +369,9 @@ if ticker:
                 st.session_state.industry = ind_name
                 st.session_state.ev_ebitda_actual = ev_ebitda
                 st.session_state.file_date = file_date
+                st.session_state.hist_data = hist_data
+                st.session_state.comp_data = comp_data
+                st.session_state.company_name = company_name
                 st.session_state.reset_key += 1
             else:
                 st.error(f"Unable to fetch data: {fx_msg}")
@@ -269,6 +382,8 @@ if ticker:
                 st.session_state.industry = "Unknown"
                 st.session_state.ev_ebitda_actual = None
                 st.session_state.file_date = "Unknown"
+                st.session_state.hist_data = []
+                st.session_state.comp_data = []
         else:
             cur_price = st.session_state.last_price
             shares_def = st.session_state.last_shares
@@ -286,10 +401,35 @@ else:
     shares_def = 1.0
     cur_price = 0.0
 
-date_display = st.session_state.get('file_date', 'Unknown')
-st.markdown(f"### Year 0: Base Financials (Ended {date_display})")
+# Company name banner
+company_name_display = st.session_state.get('company_name', '')
+if company_name_display and ticker:
+    ind_display = st.session_state.get('industry', '')
+    st.markdown(f"""
+    <div style="margin: 8px 0 18px 0;">
+      <span style="font-size: 26px; font-weight: 700; color: #fff;">{company_name_display}</span>
+      <span style="font-size: 16px; color: #60a5fa; margin-left: 10px; font-weight: 600;">({ticker})</span>
+      {'<span style="font-size: 12px; color: rgba(255,255,255,0.45); margin-left: 12px;">· ' + ind_display + '</span>' if ind_display and ind_display != 'Unknown' else ''}
+    </div>
+    """, unsafe_allow_html=True)
 
-with st.expander("Expand to edit Year 0 Data (Yahoo Imported)", expanded=True):
+date_display = st.session_state.get('file_date', 'Unknown')
+
+# ==========================================
+# MAIN TAB LAYOUT
+# ==========================================
+tab_data, tab_model, tab_returns, tab_hist, tab_comp = st.tabs([
+    "📋 Base Data",
+    "📊 DCF Model",
+    "📈 Returns & Sensitivity",
+    "🕐 Historical",
+    "🏢 Comparables",
+])
+
+# ── TAB 1: BASE DATA ──────────────────────
+with tab_data:
+    st.markdown(f"#### Year 0 Financials (Ended {date_display})")
+    st.caption("Figures imported from Yahoo Finance. Unlock to override any value.")
     with st.form("y0_form"):
         # ROW 1
         c1, c2, c3, c4 = st.columns(4)
@@ -322,7 +462,7 @@ with st.expander("Expand to edit Year 0 Data (Yahoo Imported)", expanded=True):
         
         if shares_in == 0: shares_in = 1.0
         
-        if st.form_submit_button("Update Model"):
+        if st.form_submit_button("Update Model", use_container_width=True):
             st.session_state.y0['ChangeInWC'] = nwc_in
 
 # ==========================================
@@ -449,6 +589,26 @@ with st.sidebar:
     
     sbc_r = (sbc_in / r_in) if r_in > 0 else 0.0
 
+    st.markdown("---")
+    st.markdown("**SBC Treatment**")
+    sbc_as_cost = st.toggle(
+        "Treat SBC as Real Cost",
+        value=True,
+        help=(
+            "ON (recommended): SBC is subtracted from FCF — it dilutes shareholders and should be treated as a real expense. "
+            "OFF: SBC is added back as a non-cash item (inflates intrinsic value for high-SBC companies)."
+        )
+    )
+    if sbc_as_cost:
+        st.caption("✅ SBC deducted from FCF (dilution cost)")
+        # Net effect: subtract SBC from FCF. Since NOPAT already excludes SBC
+        # (EBIT from income stmt includes SBC expense), adding it back would be wrong.
+        # Setting sbc_r = 0 means we don't add it back. Correct treatment.
+        sbc_r_fcf = 0.0
+    else:
+        st.caption("⚠️ SBC added back (non-cash addback mode)")
+        sbc_r_fcf = sbc_r
+
 # ==========================================
 # 7. CALCULATION ENGINE (SMART DECAY)
 # ==========================================
@@ -486,7 +646,7 @@ if r_in > 0:
         # AUTO CALCULATE NWC based on Sidebar Driver
         dnwc = (rev - prev_rev) * nwc_r
         
-        sbc_proj = rev * sbc_r
+        sbc_proj = rev * sbc_r_fcf
         
         fcff = nopat + da - capex - dnwc + sbc_proj
         
@@ -502,33 +662,32 @@ else:
 df_base = pd.DataFrame(base_data).set_index('Year')
 
 # ==========================================
-# 8. INTERACTIVE TABLE
+# 8. INTERACTIVE TABLE  (rendered inside tab_model)
 # ==========================================
-st.divider()
+with tab_model:
+    c_title, c_space, c_tools = st.columns([5, 3, 2], vertical_alignment="bottom")
+    with c_title: st.subheader(f"Projected Free Cash Flow (Millions {curr_symbol})")
+    with c_tools:
+        t_col, b_col = st.columns([1, 1], gap="small")
+        with t_col: is_unlocked = st.toggle("Unlock", value=False)
+        with b_col:
+            if st.button("↺ Reset", use_container_width=True):
+                st.session_state.reset_key += 1
+                st.rerun()
 
-c_title, c_space, c_tools = st.columns([5, 3, 2], vertical_alignment="bottom")
-with c_title: st.subheader(f"Projected Free Cash Flow (Millions {curr_symbol})")
-with c_tools:
-    t_col, b_col = st.columns([1, 1], gap="small")
-    with t_col: is_unlocked = st.toggle("Unlock", value=False)
-    with b_col:
-        if st.button("↺ Reset", use_container_width=True):
-            st.session_state.reset_key += 1
-            st.rerun()
+    display_cols = [f"Year {y}" for y in range(6)]
+    disabled_cols = display_cols if not is_unlocked else ["Year 0"]
 
-display_cols = [f"Year {y}" for y in range(6)]
-disabled_cols = display_cols if not is_unlocked else ["Year 0"]
+    df_display = df_base.T
+    df_display.columns = display_cols
+    df_formatted = df_display.map(lambda x: f"{x:,.2f}")
 
-df_display = df_base.T
-df_display.columns = display_cols
-df_formatted = df_display.map(lambda x: f"{x:,.2f}")
-
-edited_df = st.data_editor(
-    df_formatted,
-    use_container_width=True,
-    disabled=disabled_cols,
-    key=f"editor_{st.session_state.reset_key}"
-)
+    edited_df = st.data_editor(
+        df_formatted,
+        use_container_width=True,
+        disabled=disabled_cols,
+        key=f"editor_{st.session_state.reset_key}"
+    )
 
 # ==========================================
 # 9. VALUATION LOGIC
@@ -552,7 +711,7 @@ try:
             rev_prev = clean_currency(edited_df.loc['Revenue', prev_col], curr_symbol)
             dnwc_final = (rev_edit - rev_prev) * nwc_r
 
-        sbc_proj = rev_edit * sbc_r
+        sbc_proj = rev_edit * sbc_r_fcf
         
         nopat = ebit_edit * (1 - tax_rate)
         # Recalc FCF
@@ -601,301 +760,406 @@ except Exception as e:
     p_g, p_c, p_e, avg_int, mos_pct = 0,0,0,0,0
     ev_g, ev_c, ev_e = 0,0,0
 
-# ==========================================
-# 10. RESULTS VISUALIZATION
-# ==========================================
-st.divider()
 
-if cur_price > 0 and r_in > 0:
-    model_prices = [p_g, p_c, p_e]
-    min_val = min(model_prices) 
-    max_val = max(model_prices) 
-    
-    mos_conservative = (min_val - cur_price) / cur_price
-    mos_aggressive = (max_val - cur_price) / cur_price
-    
-    if mos_conservative > 0:
-        main_color = "status-under"
-        rating_txt = "STRONG BUY"
-    elif mos_pct > 0.20: 
-        main_color = "status-under"
-        rating_txt = "STRONG BUY"
-    elif mos_pct > 0:
-        main_color = "text-orange"
-        rating_txt = "MODERATE BUY"
-    else:
-        main_color = "status-over"
-        rating_txt = "OVERVALUED"
+# ==========================================
+# 10. RESULTS VISUALIZATION  (inside tab_model)
+# ==========================================
+with tab_model:
+    st.divider()
+    if cur_price > 0 and r_in > 0:
+        model_prices = [p_g, p_c, p_e]
+        min_val = min(model_prices)
+        max_val = max(model_prices)
 
-    html_code = f"""
+        mos_conservative = (min_val - cur_price) / cur_price
+        mos_aggressive   = (max_val - cur_price) / cur_price
+
+        if mos_conservative > 0:
+            main_color = "status-under"; rating_txt = "STRONG BUY"
+        elif mos_pct > 0.20:
+            main_color = "status-under"; rating_txt = "STRONG BUY"
+        elif mos_pct > 0:
+            main_color = "text-orange";  rating_txt = "MODERATE BUY"
+        else:
+            main_color = "status-over";  rating_txt = "OVERVALUED"
+
+        html_code = f"""
 <div class="glass-card">
 <div style="display:flex; justify-content: space-around; align-items: center; margin-bottom: 15px;">
 <div style="text-align:center;">
-<div class="val-label">CURRENT PRICE</div>
-<div class="val-price">{curr_symbol}{cur_price:,.2f}</div>
+  <div class="val-label">CURRENT PRICE</div>
+  <div class="val-price">{curr_symbol}{cur_price:,.2f}</div>
 </div>
 <div style="text-align:center;">
-<div class="val-label">INTRINSIC RANGE</div>
-<div class="val-price text-blue" style="font-size: 32px; margin-bottom: 5px;">
-{curr_symbol}{min_val:,.0f} - {curr_symbol}{max_val:,.0f}
-</div>
-<div style="font-size: 12px; opacity: 0.8;">Average: {curr_symbol}{avg_int:,.2f}</div>
+  <div class="val-label">INTRINSIC RANGE</div>
+  <div class="val-price text-blue" style="font-size: 32px; margin-bottom: 5px;">
+    {curr_symbol}{min_val:,.0f} – {curr_symbol}{max_val:,.0f}
+  </div>
+  <div style="font-size: 12px; opacity: 0.8;">Average: {curr_symbol}{avg_int:,.2f}</div>
 </div>
 <div style="text-align:center;">
-<div class="val-label">RATING</div>
-<div class="val-price {main_color}" style="font-size: 32px;">{rating_txt}</div>
-<div style="{main_color}">Avg Upside: {mos_pct:+.1%}</div>
+  <div class="val-label">RATING</div>
+  <div class="val-price {main_color}" style="font-size: 32px;">{rating_txt}</div>
+  <div class="{main_color}">Avg Upside: {mos_pct:+.1%}</div>
 </div>
 </div>
 <div style="background: rgba(255,255,255,0.1); height: 8px; border-radius: 4px; position: relative; margin: 0 20px;">
-<div style="position: absolute; left: 10%; right: 10%; top: 0; bottom: 0; background: #60a5fa; opacity: 0.3; border-radius: 4px;"></div>
-<div style="position: absolute; left: 10%; top: 12px; font-size: 10px; color: #60a5fa;">Low<br>{mos_conservative:+.0%}</div>
-<div style="position: absolute; right: 10%; top: 12px; font-size: 10px; text-align: right; color: #60a5fa;">High<br>{mos_aggressive:+.0%}</div>
+  <div style="position: absolute; left: 10%; right: 10%; top: 0; bottom: 0; background: #60a5fa; opacity: 0.3; border-radius: 4px;"></div>
+  <div style="position: absolute; left: 10%; top: 12px; font-size: 10px; color: #60a5fa;">Low<br>{mos_conservative:+.0%}</div>
+  <div style="position: absolute; right: 10%; top: 12px; font-size: 10px; text-align: right; color: #60a5fa;">High<br>{mos_aggressive:+.0%}</div>
 </div>
 <div style="text-align: center; font-size: 11px; margin-top: 25px; opacity: 0.6;">
-Conservative Upside: <strong>{mos_conservative:+.1%}</strong> &nbsp; | &nbsp; Aggressive Upside: <strong>{mos_aggressive:+.1%}</strong>
+  Conservative Upside: <strong>{mos_conservative:+.1%}</strong> &nbsp;|&nbsp; Aggressive Upside: <strong>{mos_aggressive:+.1%}</strong>
 </div>
-</div>
-"""
-    st.markdown(html_code, unsafe_allow_html=True)
+</div>"""
+        st.markdown(html_code, unsafe_allow_html=True)
 
-    pdf_bytes = create_pdf(ticker, pd.Timestamp.now().strftime('%Y-%m-%d'), cur_price, avg_int, mos_pct, wacc, safe_ltg, exit_mult, curr_symbol)
-    pdf_spot.download_button(label="📄 Download PDF", data=pdf_bytes, file_name=f"{ticker}_Valuation.pdf", mime="application/pdf")
+        pdf_bytes = create_pdf(ticker, pd.Timestamp.now().strftime('%Y-%m-%d'), cur_price, avg_int, mos_pct, wacc, safe_ltg, exit_mult, curr_symbol)
+        pdf_spot.download_button(label="📄 Download PDF", data=pdf_bytes, file_name=f"{ticker}_Valuation.pdf", mime="application/pdf")
 
-st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("<br>", unsafe_allow_html=True)
 
-c_g, c_c, c_e = st.columns(3)
-def make_bridge(pv_fcf, pv_tv, ev, debt, cash, eq):
-    return pd.DataFrame({
-        "Component": ["PV of 5y Cash Flows", "PV of Terminal", "Enterprise Value", "Less: Net Debt", "Equity Value"],
-        "Value": [pv_fcf, pv_tv, ev, debt-cash, eq]
-    }).set_index("Component")
+        def make_bridge(pv_fcf, pv_tv, ev, debt, cash, eq):
+            return pd.DataFrame({
+                "Component": ["PV of 5y Cash Flows", "PV of Terminal", "Enterprise Value", "Less: Net Debt", "Equity Value"],
+                "Value": [pv_fcf, pv_tv, ev, debt - cash, eq]
+            }).set_index("Component")
 
-bridge_format = f"{curr_symbol}{{:,.2f}}M"
+        bridge_format = f"{curr_symbol}{{:,.2f}}M"
+        c_g, c_c, c_e = st.columns(3)
 
-with c_g:
-    st.markdown(f"""<div class="val-card border-purple"><div class="val-title">Perpetuity Growth</div><div class="val-sub">Stable {safe_ltg:.1%} long-term growth</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-purple">{curr_symbol}{p_g:,.2f}</div><div class="val-ev"><span>EV: </span><strong>{curr_symbol}{ev_g:,.2f}M</strong></div></div>""", unsafe_allow_html=True)
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown("##### Bridge (Gordon)", unsafe_allow_html=True)
-    st.dataframe(make_bridge(sum_pv_final, pv_tv_g, ev_g, debt_in, cash_in, ev_g-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
+        with c_g:
+            st.markdown(f"""<div class="val-card border-purple"><div class="val-title">Perpetuity Growth</div><div class="val-sub">Stable {safe_ltg:.1%} long-term growth</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-purple">{curr_symbol}{p_g:,.2f}</div><div class="val-ev"><span>EV: </span><strong>{curr_symbol}{ev_g:,.2f}M</strong></div></div>""", unsafe_allow_html=True)
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown("##### Bridge (Gordon)")
+            st.dataframe(make_bridge(sum_pv_final, pv_tv_g, ev_g, debt_in, cash_in, ev_g-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
 
-with c_c:
-    st.markdown(f"""<div class="val-card border-orange"><div class="val-title">Conservative Case 🛡️</div><div class="val-sub">Higher Discount Rate (WACC + 1%)</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-orange">{curr_symbol}{p_c:,.2f}</div><div class="val-ev"><span>EV: </span><strong>{curr_symbol}{ev_c:,.2f}M</strong></div></div>""", unsafe_allow_html=True)
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown("##### Bridge (Conservative)", unsafe_allow_html=True)
-    st.dataframe(make_bridge(sum_pv_final, pv_tv_c, ev_c, debt_in, cash_in, ev_c-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
+        with c_c:
+            st.markdown(f"""<div class="val-card border-orange"><div class="val-title">Conservative Case 🛡️</div><div class="val-sub">Higher Discount Rate (WACC + 1%)</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-orange">{curr_symbol}{p_c:,.2f}</div><div class="val-ev"><span>EV: </span><strong>{curr_symbol}{ev_c:,.2f}M</strong></div></div>""", unsafe_allow_html=True)
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown("##### Bridge (Conservative)")
+            st.dataframe(make_bridge(sum_pv_final, pv_tv_c, ev_c, debt_in, cash_in, ev_c-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
 
-with c_e:
-    st.markdown(f"""<div class="val-card border-green"><div class="val-title">Exit Multiple 💼</div><div class="val-sub">Based on {exit_mult}x EBITDA</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-green">{curr_symbol}{p_e:,.2f}</div><div class="val-ev"><span>EV: </span><strong>{curr_symbol}{ev_e:,.2f}M</strong></div></div>""", unsafe_allow_html=True)
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown("##### Bridge (Multiple)", unsafe_allow_html=True)
-    st.dataframe(make_bridge(sum_pv_final, pv_tv_e, ev_e, debt_in, cash_in, ev_e-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
+        with c_e:
+            st.markdown(f"""<div class="val-card border-green"><div class="val-title">Exit Multiple 💼</div><div class="val-sub">Based on {exit_mult}x EBITDA</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-green">{curr_symbol}{p_e:,.2f}</div><div class="val-ev"><span>EV: </span><strong>{curr_symbol}{ev_e:,.2f}M</strong></div></div>""", unsafe_allow_html=True)
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown("##### Bridge (Multiple)")
+            st.dataframe(make_bridge(sum_pv_final, pv_tv_e, ev_e, debt_in, cash_in, ev_e-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
 
-# ==========================================
-# 11. SENSITIVITY TABLE
-# ==========================================
-st.markdown("<br><hr><br>", unsafe_allow_html=True)
-c_sens, c_mc = st.columns([1, 1])
+    else:
+        st.info("👈 Enter a ticker and configure your assumptions to see valuation results.")
 
-with c_sens:
-    st.subheader("Sensitivity Analysis 🎯")
-    st.caption("Implied Share Price based on WACC vs. Terminal Growth")
+# ── TAB 3: RETURNS & SENSITIVITY ──────────
+with tab_returns:
 
-    def quick_dcf_calc(w, t_g):
-        # Use Global Ratios from Sidebar
-        # sbc_r and nwc_r are defined in sidebar, check scope
-        # NOTE: sensitivity uses the same globals defined in sidebar
-        
-        fcf_pv_sum = 0.0
-        prev_rev = r_in
-        last_fcf = 0.0
-        last_ebitda = 0.0
-        
-        for y in range(1, 6):
-            rev = prev_rev * (1 + g_rev)
-            ebit = rev * margin_tgt
-            nopat = ebit * (1 - tax_rate)
-            da = rev * dep_r
-            capex = rev * cap_r
-            # Fix Sensitivity to use same NWC driver
-            dnwc = (rev - prev_rev) * nwc_r
-            sbc_proj = rev * sbc_r
-            
-            fcff = nopat + da - capex - dnwc + sbc_proj
-            pv = fcff * ((1 + w)**-(y-0.5))
-            fcf_pv_sum += pv
-            prev_rev = rev
-            if y == 5:
-                last_fcf = fcff
-                last_ebitda = ebit + da 
+    # ---- Rate of Return ----
+    if cur_price > 0 and r_in > 0 and avg_int > 0:
+        st.subheader("📈 Rate of Return")
+        ror_col1, ror_col2 = st.columns(2)
 
-        tv_g = last_fcf * (1 + t_g) / (w - t_g)
-        pv_tv_g = tv_g * ((1 + w)**-5)
-        tv_e = last_ebitda * exit_mult
-        pv_tv_e = tv_e * ((1 + w)**-5)
-        
-        eq_g = (fcf_pv_sum + pv_tv_g) - (debt_in - cash_in)
-        eq_e = (fcf_pv_sum + pv_tv_e) - (debt_in - cash_in)
-        
-        return ((eq_g + eq_e) / 2) / shares_in if shares_in > 0 else 0
-
-    wacc_range = [wacc - 0.01, wacc - 0.005, wacc, wacc + 0.005, wacc + 0.01]
-    ltg_range = [ltg - 0.005, ltg - 0.0025, ltg, ltg + 0.0025, ltg + 0.005]
-
-    sens_data = {}
-    for t_g in ltg_range:
-        col_data = []
-        for w_r in wacc_range:
-            val = quick_dcf_calc(w_r, t_g)
-            col_data.append(val)
-        sens_data[f"{t_g:.2%}"] = col_data
-
-    df_sens = pd.DataFrame(sens_data, index=[f"{w:.1%}" for w in wacc_range])
-    df_sens.index.name = "WACC"
-    df_sens.columns.name = "Terminal Growth"
-
-    def style_sens(val):
-        if val == 0: return 'background-color: gray; color: white;'
-        color = '#2a2a3e' 
-        if val > cur_price * 1.1: color = '#105234'
-        elif val < cur_price * 0.9: color = '#4a151b'
-        return f'background-color: {color}; color: white; border: 1px solid #444;'
-
-    st.dataframe(df_sens.style.format(f"{curr_symbol}{{:,.2f}}").map(style_sens), use_container_width=True)
-
-# ==========================================
-# 12. MONTE CARLO SIMULATION (ENHANCED)
-# ==========================================
-with c_mc:
-    st.subheader("Monte Carlo Simulation 🎲")
-    st.caption(f"Running randomized scenarios to find probability.")
-    
-    sim_count = st.slider("Number of Simulations", 1000, 10000, 2000, step=1000)
-    
-    if st.button("Run Simulation", use_container_width=True):
-        with st.spinner("Simulating..."):
-            np.random.seed(42) 
-            sim_results = []
-            
-            # FIX 9: Multivariate Normal Distribution (Correlation)
-            means = [g_rev, margin_tgt, wacc]
-            # Standard Deviations
-            sig_g = g_rev * 0.2
-            sig_m = margin_tgt * 0.15
-            sig_w = wacc * 0.1
-            
-            # Correlation Coefficients
-            rho_gm = -0.3 # Growth vs Margin (High growth = spend more = lower margin)
-            rho_gw = 0.1  # Growth vs WACC (High growth = higher risk)
-            rho_mw = 0.05 # Margin vs WACC
-            
-            # Covariance Matrix
-            cov_matrix = [
-                [sig_g**2,              rho_gm*sig_g*sig_m,    rho_gw*sig_g*sig_w],
-                [rho_gm*sig_g*sig_m,    sig_m**2,              rho_mw*sig_m*sig_w],
-                [rho_gw*sig_g*sig_w,    rho_mw*sig_m*sig_w,    sig_w**2]
-            ]
-            
-            # Draw correlated samples
-            draws = np.random.multivariate_normal(means, cov_matrix, sim_count)
-            
-            # Clipping to prevent unrealistic outliers
-            draws[:, 1] = np.clip(draws[:, 1], 0.01, 0.60) # Margin [1% - 60%]
-            
-            for i in range(sim_count):
-                g_sim = draws[i, 0]
-                m_sim = draws[i, 1]
-                w_sim = draws[i, 2]
-                
-                pv_sum = 0.0
-                prev_rev_sim = r_in
-                
-                # Hard Clip Terminal Growth to be strictly less than WACC
-                safe_ltg_sim = min(ltg, w_sim - 0.015)
-                
-                growth_decay_step_sim = 0.0
-                if g_sim > safe_ltg_sim:
-                    target_y5 = (g_sim + safe_ltg_sim) / 2
-                    growth_decay_step_sim = (g_sim - target_y5) / 4
-                
-                fcf5_sim = 0.0
-                ebitda5_sim = 0.0
-                da5_sim = 0.0
-
-                for y in range(1, 6):
-                    current_g_sim = g_sim - (growth_decay_step_sim * (y - 1))
-                    if current_g_sim < safe_ltg_sim: current_g_sim = safe_ltg_sim
-                    
-                    rev_sim = prev_rev_sim * (1 + current_g_sim)
-                    ebit_sim = rev_sim * m_sim
-                    nopat_sim = ebit_sim * (1 - tax_rate)
-                    
-                    # Use Global Ratios
-                    da_sim = rev_sim * dep_r
-                    capex_sim = rev_sim * cap_r
-                    
-                    # SIMULATE NWC
-                    dnwc_sim = (rev_sim - prev_rev_sim) * nwc_r
-                    
-                    sbc_sim = rev_sim * sbc_r
-                    
-                    fcff_sim = nopat_sim + da_sim - capex_sim - dnwc_sim + sbc_sim
-                    
-                    # Mid-year discount
-                    pv_sim = fcff_sim * ((1 + w_sim)**-(y-0.5))
-                    pv_sum += pv_sim
-                    prev_rev_sim = rev_sim
-                    
-                    if y == 5:
-                        fcf5_sim = fcff_sim
-                        ebitda5_sim = ebit_sim + da_sim
-                        da5_sim = da_sim
-                
-                # Terminal Values
-                # Normalize Capex using slider ratio
-                term_capex_sim = da5_sim * term_cap_ratio
-                fcf5_norm_sim = (ebitda5_sim - da5_sim)*(1-tax_rate) + da5_sim - term_capex_sim
-                
-                tv_g_sim = fcf5_norm_sim * (1+safe_ltg_sim)/(w_sim-safe_ltg_sim)
-                pv_tv_g_sim = tv_g_sim * ((1+w_sim)**-5)
-                
-                tv_e_sim = ebitda5_sim * exit_mult
-                pv_tv_e_sim = tv_e_sim * ((1+w_sim)**-5)
-                
-                w_cons_sim = w_sim + 0.01
-                safe_ltg_cons = min(safe_ltg_sim, w_cons_sim - 0.015)
-                tv_c_sim = fcf5_norm_sim * (1+safe_ltg_cons)/(w_cons_sim-safe_ltg_cons)
-                pv_tv_c_sim = tv_c_sim * ((1+w_sim)**-5)
-                
-                ev_g = pv_sum + pv_tv_g_sim
-                ev_c = pv_sum + pv_tv_c_sim
-                ev_e = pv_sum + pv_tv_e_sim
-                
-                share_g = (ev_g - (debt_in - cash_in)) / shares_in
-                share_c = (ev_c - (debt_in - cash_in)) / shares_in
-                share_e = (ev_e - (debt_in - cash_in)) / shares_in
-                
-                avg_share_price = (share_g + share_c + share_e) / 3
-                sim_results.append(avg_share_price)
-            
-            # FIXED CHART: Use clean Numpy Bins
-            sim_df = pd.DataFrame(sim_results, columns=["Price"])
-            sim_df = sim_df[(sim_df['Price'] > 0) & (sim_df['Price'] < cur_price * 4)]
-            
-            counts, bins = np.histogram(sim_df['Price'], bins=30)
-            bin_mids = [f"{curr_symbol}{(bins[i]+bins[i+1])/2:.0f}" for i in range(len(bins)-1)]
-            
-            hist_df = pd.DataFrame({"Frequency": counts}, index=bin_mids)
-            st.bar_chart(hist_df, color="#60a5fa")
-            
-            p10 = np.percentile(sim_results, 10)
-            p50 = np.percentile(sim_results, 50)
-            p90 = np.percentile(sim_results, 90)
-            
+        with ror_col1:
+            st.markdown("**Implied Annual Return (if intrinsic value is correct)**")
+            cagr_5  = (avg_int / cur_price) ** (1/5)  - 1
+            cagr_3  = (avg_int / cur_price) ** (1/3)  - 1
+            cagr_10 = (avg_int / cur_price) ** (1/10) - 1
+            color_5 = "#4ade80" if cagr_5 > wacc else "#f87171"
             st.markdown(f"""
-            <div style="display:flex; justify-content: space-between; font-size: 12px; margin-top: 10px;">
-                <div class="status-over">P10 (Bear): {curr_symbol}{p10:,.2f}</div>
-                <div class="text-blue">P50 (Base): {curr_symbol}{p50:,.2f}</div>
-                <div class="status-under">P90 (Bull): {curr_symbol}{p90:,.2f}</div>
+            <div style="display:flex; gap:16px; flex-wrap:wrap;">
+              <div class="glass-card" style="flex:1; text-align:center; padding:14px;">
+                <div class="val-label">3-Year CAGR</div>
+                <div style="font-size:28px; font-weight:700; color:{color_5};">{cagr_3:+.1%}</div>
+              </div>
+              <div class="glass-card" style="flex:1; text-align:center; padding:14px;">
+                <div class="val-label">5-Year CAGR</div>
+                <div style="font-size:28px; font-weight:700; color:{color_5};">{cagr_5:+.1%}</div>
+              </div>
+              <div class="glass-card" style="flex:1; text-align:center; padding:14px;">
+                <div class="val-label">10-Year CAGR</div>
+                <div style="font-size:28px; font-weight:700; color:{color_5};">{cagr_10:+.1%}</div>
+              </div>
+            </div>
+            <div style="font-size:11px; opacity:0.5; margin-top:4px;">
+              CAGR assumes price converges to intrinsic value ({curr_symbol}{avg_int:,.2f}) over the horizon.
+              WACC hurdle: {wacc:.1%}
             </div>
             """, unsafe_allow_html=True)
+
+        with ror_col2:
+            st.markdown("**Revenue Growth Required to Justify Current Price**")
+            try:
+                def price_at_growth(g_try):
+                    safe_ltg_try = min(ltg, wacc - 0.015)
+                    decay = 0.0
+                    if g_try > safe_ltg_try:
+                        decay = (g_try - (g_try + safe_ltg_try)/2) / 4
+                    pv_s = 0.0; prev_r = r_in; ebitda5 = 0.0; da5 = 0.0
+                    for y in range(1, 6):
+                        cg = max(g_try - decay*(y-1), safe_ltg_try)
+                        rv = prev_r * (1+cg)
+                        eb = rv * margin_tgt; no = eb * (1-tax_rate)
+                        da = rv * dep_r; cx = rv * cap_r
+                        dn = (rv - prev_r) * nwc_r; sb = rv * sbc_r_fcf
+                        pv_s += (no + da - cx - dn + sb) * ((1+wacc)**(-(y-0.5)))
+                        prev_r = rv
+                        if y == 5: ebitda5 = eb+da; da5 = da
+                    tc = da5 * term_cap_ratio
+                    fn = (ebitda5-da5)*(1-tax_rate)+da5-tc
+                    tv_g2 = fn*(1+safe_ltg_try)/(wacc-safe_ltg_try) * ((1+wacc)**-5)
+                    tv_e2 = ebitda5*exit_mult * ((1+wacc)**-5)
+                    wacc_c = wacc+0.01; sltg_c = min(safe_ltg_try, wacc_c-0.015)
+                    tv_c2 = fn*(1+sltg_c)/(wacc_c-sltg_c) * ((1+wacc)**-5)
+                    def ep(tv): return ((pv_s+tv-(debt_in-cash_in))/shares_in) if shares_in>0 else 0
+                    return (ep(tv_g2)+ep(tv_e2)+ep(tv_c2))/3
+
+                lo, hi = -0.20, 1.00; req_g = None
+                for _ in range(60):
+                    mid = (lo+hi)/2
+                    if price_at_growth(mid) < cur_price: lo = mid
+                    else: hi = mid
+                    if abs(hi-lo) < 0.0001: req_g = mid; break
+
+                if req_g is not None:
+                    delta   = req_g - g_rev
+                    color_g = "#4ade80" if req_g <= g_rev else "#fb923c"
+                    verdict = "✅ Current assumptions exceed what's needed" if req_g <= g_rev else "⚠️ Market is pricing in higher growth than modelled"
+                    st.markdown(f"""
+                    <div class="glass-card" style="text-align:center; padding:18px;">
+                      <div class="val-label">Required Revenue CAGR (Y1–5)</div>
+                      <div style="font-size:36px; font-weight:700; color:{color_g}; margin:6px 0;">{req_g:.1%}</div>
+                      <div style="font-size:12px; opacity:0.7;">Your assumption: {g_rev:.1%} &nbsp;|&nbsp; Delta: {delta:+.1%}</div>
+                      <div style="font-size:11px; margin-top:8px; opacity:0.55;">{verdict}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+            except Exception:
+                st.caption("Could not compute required growth.")
+    else:
+        st.info("Enter a ticker to see return analysis.")
+
+    st.divider()
+
+    # ---- Sensitivity + Monte Carlo side by side ----
+    c_sens, c_mc = st.columns(2)
+
+    with c_sens:
+        st.subheader("Sensitivity Analysis 🎯")
+        st.caption("Implied Share Price based on WACC vs. Terminal Growth")
+
+        def quick_dcf_calc(w, t_g, r_in=r_in, g_rev=g_rev, margin_tgt=margin_tgt,
+                            tax_rate=tax_rate, dep_r=dep_r, cap_r=cap_r, nwc_r=nwc_r,
+                            sbc_r_fcf=sbc_r_fcf, exit_mult=exit_mult, term_cap_ratio=term_cap_ratio,
+                            debt_in=debt_in, cash_in=cash_in, shares_in=shares_in, safe_ltg=safe_ltg):
+            safe_t_g = min(t_g, w - 0.015)
+            growth_decay_step = 0.0
+            if g_rev > safe_t_g:
+                target_y5_growth = (g_rev + safe_t_g) / 2
+                growth_decay_step = (g_rev - target_y5_growth) / 4
+            fcf_pv_sum = 0.0; prev_rev = r_in; last_ebitda = 0.0; last_da = 0.0
+            for y in range(1, 6):
+                current_g = g_rev - (growth_decay_step * (y - 1))
+                if current_g < safe_t_g: current_g = safe_t_g
+                rev = prev_rev * (1 + current_g)
+                ebit = rev * margin_tgt; nopat = ebit * (1 - tax_rate)
+                da = rev * dep_r; capex = rev * cap_r
+                dnwc = (rev - prev_rev) * nwc_r; sbc_proj = rev * sbc_r_fcf
+                fcff = nopat + da - capex - dnwc + sbc_proj
+                fcf_pv_sum += fcff * ((1 + w)**-(y - 0.5))
+                prev_rev = rev
+                if y == 5: last_ebitda = ebit + da; last_da = da
+            term_capex = last_da * term_cap_ratio
+            fcf5_norm = (last_ebitda - last_da) * (1 - tax_rate) + last_da - term_capex
+            tv_g = fcf5_norm * (1 + safe_t_g) / (w - safe_t_g)
+            pv_tv_g = tv_g * ((1 + w)**-5)
+            tv_e = last_ebitda * exit_mult
+            pv_tv_e = tv_e * ((1 + w)**-5)
+            eq_g = (fcf_pv_sum + pv_tv_g) - (debt_in - cash_in)
+            eq_e = (fcf_pv_sum + pv_tv_e) - (debt_in - cash_in)
+            return ((eq_g + eq_e) / 2) / shares_in if shares_in > 0 else 0
+
+        wacc_range = [wacc - 0.01, wacc - 0.005, wacc, wacc + 0.005, wacc + 0.01]
+        ltg_range  = [ltg  - 0.005, ltg  - 0.0025, ltg, ltg  + 0.0025, ltg  + 0.005]
+
+        sens_data = {}
+        for t_g in ltg_range:
+            sens_data[f"{t_g:.2%}"] = [quick_dcf_calc(w_r, t_g) for w_r in wacc_range]
+
+        df_sens = pd.DataFrame(sens_data, index=[f"{w:.1%}" for w in wacc_range])
+        df_sens.index.name = "WACC"
+        df_sens.columns.name = "Terminal Growth"
+
+        def style_sens(val):
+            if val == 0: return 'background-color: gray; color: white;'
+            color = '#2a2a3e'
+            if val > cur_price * 1.1: color = '#105234'
+            elif val < cur_price * 0.9: color = '#4a151b'
+            return f'background-color: {color}; color: white; border: 1px solid #444;'
+
+        st.dataframe(df_sens.style.format(f"{curr_symbol}{{:,.2f}}").map(style_sens), use_container_width=True)
+
+    with c_mc:
+        st.subheader("Monte Carlo Simulation 🎲")
+        st.caption("Randomised scenarios to estimate probability distribution of intrinsic value.")
+
+        sim_count = st.slider("Number of Simulations", 1000, 10000, 2000, step=1000)
+
+        if st.button("Run Simulation", use_container_width=True):
+            with st.spinner("Simulating..."):
+                np.random.seed(42)
+                sim_results = []
+
+                means = [g_rev, margin_tgt, wacc]
+                sig_g = g_rev * 0.2; sig_m = margin_tgt * 0.15; sig_w = wacc * 0.1
+                rho_gm = -0.3; rho_gw = 0.1; rho_mw = 0.05
+                cov_matrix = [
+                    [sig_g**2,           rho_gm*sig_g*sig_m, rho_gw*sig_g*sig_w],
+                    [rho_gm*sig_g*sig_m, sig_m**2,           rho_mw*sig_m*sig_w],
+                    [rho_gw*sig_g*sig_w, rho_mw*sig_m*sig_w, sig_w**2          ],
+                ]
+                draws = np.random.multivariate_normal(means, cov_matrix, sim_count)
+                draws[:, 1] = np.clip(draws[:, 1], 0.01, 0.60)
+
+                for i in range(sim_count):
+                    g_sim = draws[i, 0]; m_sim = draws[i, 1]; w_sim = draws[i, 2]
+                    pv_sum = 0.0; prev_rev_sim = r_in
+                    safe_ltg_sim = min(ltg, w_sim - 0.015)
+                    growth_decay_step_sim = 0.0
+                    if g_sim > safe_ltg_sim:
+                        target_y5 = (g_sim + safe_ltg_sim) / 2
+                        growth_decay_step_sim = (g_sim - target_y5) / 4
+                    fcf5_sim = ebitda5_sim = da5_sim = 0.0
+
+                    for y in range(1, 6):
+                        current_g_sim = g_sim - (growth_decay_step_sim * (y - 1))
+                        if current_g_sim < safe_ltg_sim: current_g_sim = safe_ltg_sim
+                        rev_sim   = prev_rev_sim * (1 + current_g_sim)
+                        ebit_sim  = rev_sim * m_sim
+                        nopat_sim = ebit_sim * (1 - tax_rate)
+                        da_sim    = rev_sim * dep_r; capex_sim = rev_sim * cap_r
+                        dnwc_sim  = (rev_sim - prev_rev_sim) * nwc_r
+                        sbc_sim   = rev_sim * sbc_r_fcf
+                        fcff_sim  = nopat_sim + da_sim - capex_sim - dnwc_sim + sbc_sim
+                        pv_sum   += fcff_sim * ((1 + w_sim)**-(y-0.5))
+                        prev_rev_sim = rev_sim
+                        if y == 5: fcf5_sim = fcff_sim; ebitda5_sim = ebit_sim + da_sim; da5_sim = da_sim
+
+                    term_capex_sim  = da5_sim * term_cap_ratio
+                    fcf5_norm_sim   = (ebitda5_sim - da5_sim)*(1-tax_rate) + da5_sim - term_capex_sim
+                    tv_g_sim        = fcf5_norm_sim * (1+safe_ltg_sim) / (w_sim-safe_ltg_sim)
+                    pv_tv_g_sim     = tv_g_sim * ((1+w_sim)**-5)
+                    tv_e_sim        = ebitda5_sim * exit_mult
+                    pv_tv_e_sim     = tv_e_sim * ((1+w_sim)**-5)
+                    w_cons_sim      = w_sim + 0.01
+                    safe_ltg_cons   = min(safe_ltg_sim, w_cons_sim - 0.015)
+                    tv_c_sim        = fcf5_norm_sim * (1+safe_ltg_cons) / (w_cons_sim-safe_ltg_cons)
+                    pv_tv_c_sim     = tv_c_sim * ((1+w_sim)**-5)
+
+                    def _ep(tv): return ((pv_sum+tv-(debt_in-cash_in))/shares_in) if shares_in>0 else 0
+                    sim_results.append((_ep(pv_tv_g_sim) + _ep(pv_tv_c_sim) + _ep(pv_tv_e_sim)) / 3)
+
+                sim_df = pd.DataFrame(sim_results, columns=["Price"])
+                sim_df = sim_df[(sim_df['Price'] > 0) & (sim_df['Price'] < cur_price * 4)]
+                counts, bins = np.histogram(sim_df['Price'], bins=30)
+                bin_mids = [f"{curr_symbol}{(bins[i]+bins[i+1])/2:.0f}" for i in range(len(bins)-1)]
+                st.bar_chart(pd.DataFrame({"Frequency": counts}, index=bin_mids), color="#60a5fa")
+
+                p10 = np.percentile(sim_results, 10)
+                p50 = np.percentile(sim_results, 50)
+                p90 = np.percentile(sim_results, 90)
+                st.markdown(f"""
+                <div style="display:flex; justify-content:space-between; font-size:12px; margin-top:10px;">
+                  <div class="status-over">P10 (Bear): {curr_symbol}{p10:,.2f}</div>
+                  <div class="text-blue">P50 (Base): {curr_symbol}{p50:,.2f}</div>
+                  <div class="status-under">P90 (Bull): {curr_symbol}{p90:,.2f}</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+# ── TAB 4: HISTORICAL ─────────────────────
+with tab_hist:
+    hist_rows = st.session_state.get('hist_data', [])
+    if hist_rows:
+        st.subheader("Historical Financials (Last 4 Years)")
+        st.caption("Use these to sanity-check your growth and margin assumptions. All values in millions.")
+
+        df_hist = pd.DataFrame(hist_rows).set_index('Year')
+        rev_vals   = df_hist['Revenue'].tolist()
+        rev_growth = [None] + [(rev_vals[i]/rev_vals[i-1]-1)*100 if rev_vals[i-1] else 0 for i in range(1, len(rev_vals))]
+        df_hist.insert(1, 'Rev Growth %', [f"{v:.1f}%" if v is not None else "—" for v in rev_growth])
+
+        display_hist = df_hist.copy()
+        for col in ['Revenue', 'D&A', 'Capex', 'SBC', 'FCFF']:
+            if col in display_hist.columns:
+                display_hist[col] = display_hist[col].apply(lambda x: f"{curr_symbol}{x:,.1f}M")
+        display_hist['EBIT Margin %'] = display_hist['EBIT Margin %'].apply(lambda x: f"{x:.1f}%")
+        st.dataframe(display_hist, use_container_width=True)
+
+        hc1, hc2 = st.columns(2)
+        with hc1:
+            st.markdown("**Revenue Trend**")
+            st.bar_chart(pd.DataFrame({'Revenue ($M)': df_hist['Revenue']}), color="#60a5fa")
+        with hc2:
+            st.markdown("**EBIT Margin % Trend**")
+            st.line_chart(pd.DataFrame({'EBIT Margin %': df_hist['EBIT Margin %']}), color="#a78bfa")
+
+        if len(rev_vals) >= 2:
+            hist_cagr = (rev_vals[-1] / rev_vals[0]) ** (1/max(len(rev_vals)-1, 1)) - 1
+            st.info(
+                f"📌 Historical Revenue CAGR: **{hist_cagr:.1%}** over {len(rev_vals)-1} years  "
+                f"| Your modelled growth: **{g_rev:.1%}**  "
+                f"| Delta: **{(g_rev - hist_cagr):+.1%}**"
+            )
+    else:
+        st.info("Enter a ticker above to load historical financials.")
+
+# ── TAB 5: COMPARABLES ────────────────────
+with tab_comp:
+    comp_rows = st.session_state.get('comp_data', [])
+    if comp_rows:
+        ind = st.session_state.get('industry', 'Unknown')
+        st.subheader(f"Peer Comparables — {ind}")
+        st.caption("Sector peers pulled from Yahoo Finance. Use EV/EBITDA median to anchor your exit multiple assumption.")
+
+        df_comp = pd.DataFrame(comp_rows)
+        if ticker and cur_price > 0 and r_in > 0:
+            ev_ebitda_self = st.session_state.get('ev_ebitda_actual', None)
+            self_row = {
+                'Ticker': f"▶ {ticker}", 'Name': f"{ticker} (You)",
+                'EV/EBITDA': round(ev_ebitda_self, 1) if ev_ebitda_self and ev_ebitda_self > 0 else None,
+                'P/E': None, 'Mkt Cap $B': None,
+            }
+            df_comp = pd.concat([pd.DataFrame([self_row]), df_comp], ignore_index=True)
+
+        peer_ev_ebitda = [r['EV/EBITDA'] for r in comp_rows if r.get('EV/EBITDA')]
+        peer_median    = round(float(np.median(peer_ev_ebitda)), 1) if peer_ev_ebitda else None
+
+        def fmt_cell(v, suffix="x"): return f"{v}{suffix}" if v is not None else "N/A"
+        df_dc = df_comp.copy()
+        df_dc['EV/EBITDA']  = df_comp['EV/EBITDA'].apply(lambda v: fmt_cell(v, "x"))
+        df_dc['P/E']        = df_comp['P/E'].apply(lambda v: fmt_cell(v, "x"))
+        df_dc['Mkt Cap $B'] = df_comp['Mkt Cap $B'].apply(lambda v: fmt_cell(v, "B"))
+        st.dataframe(df_dc.set_index('Ticker'), use_container_width=True)
+
+        if peer_median is not None:
+            diff    = exit_mult - peer_median
+            color_m = "#4ade80" if abs(diff) < 2 else "#fb923c"
+            st.markdown(f"""
+            <div class="glass-card" style="margin-top:10px;">
+              <div style="display:flex; justify-content:space-around; text-align:center;">
+                <div>
+                  <div class="val-label">Peer Median EV/EBITDA</div>
+                  <div style="font-size:28px; font-weight:700; color:#60a5fa;">{peer_median}x</div>
+                </div>
+                <div>
+                  <div class="val-label">Your Exit Multiple</div>
+                  <div style="font-size:28px; font-weight:700; color:#a78bfa;">{exit_mult:.1f}x</div>
+                </div>
+                <div>
+                  <div class="val-label">vs. Peers</div>
+                  <div style="font-size:28px; font-weight:700; color:{color_m};">{diff:+.1f}x</div>
+                </div>
+              </div>
+              <div style="text-align:center; font-size:11px; opacity:0.5; margin-top:8px;">
+                {'✅ Exit multiple is close to peer median' if abs(diff) < 2 else '⚠️ Exit multiple deviates significantly from peers — double-check your assumption'}
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
+    else:
+        st.info("Enter a ticker above to load peer comparables.")
