@@ -6,8 +6,119 @@ from io import BytesIO
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
 
+# =============================================================================
+#  PRO DCF VALUATION TOOL
+#  ---------------------------------------------------------------------------
+#  A multi-method equity valuation app built with Streamlit.
+#  Pulls live financial data from Yahoo Finance, runs a 10-year DCF model,
+#  and presents results across five UI tabs.
+#
+#  ARCHITECTURE OVERVIEW
+#  ---------------------------------------------------------------------------
+#  The file is split into two logical halves:
+#
+#  ── BACKEND (runs on every rerender, top-level scope) ──────────────────────
+#
+#  SECTION 1  Config & CSS            Global page config and custom dark-theme
+#                                     styles injected via st.markdown.
+#
+#  SECTION 2  PDF Generator           create_pdf() — builds a downloadable
+#                                     one-page valuation report via ReportLab.
+#
+#  SECTION 3  Helper Functions        fmt_comma(), clean_currency() — small
+#                                     utilities for formatting and parsing
+#                                     user-editable number inputs.
+#
+#  SECTION 4  Data Engine             get_yahoo_data() — the main data fetch.
+#                                     Cached with @st.cache_data (1hr TTL).
+#                                     Fetches: price, financials, beta, FX,
+#                                     4yr historical data, and peer comps
+#                                     (parallelized via ThreadPoolExecutor).
+#                                     Returns 11 values to session state.
+#
+#  SECTION 5  Input Setup             Ticker input, session state init,
+#                                     currency symbol resolution, company
+#                                     name banner, and Valuation Compass
+#                                     (sector-aware method guidance panel).
+#
+#  SECTION 6  Sidebar — Drivers       WACC auto-calc (CAPM), revenue growth,
+#                                     EBIT margin, tax rate, terminal growth,
+#                                     exit multiple, NWC driver, SBC toggle.
+#                                     All sidebar inputs feed into Sections
+#                                     7–9 as plain Python variables.
+#
+#  SECTION 7  Calculation Engine      10-year two-phase DCF projection.
+#                                     Growth decays linearly from g_rev (Y1)
+#                                     to safe_ltg (Y10). Produces df_base
+#                                     which feeds the editable table.
+#
+#  SECTION 8  Interactive Table       Renders df_base as an editable
+#  (tab_model)                        st.data_editor. Edits here override
+#                                     the formula projections in Section 9.
+#
+#  SECTION 9  Valuation Logic         Three independent methods, weighted avg:
+#                                       Method 1 (40%) — Gordon Growth DCF
+#                                         10yr explicit + Gordon terminal
+#                                       Method 2 (30%) — Conservative DCF
+#                                         WACC+1.5%, LTG floored at 2%
+#                                       Method 3 (30%) — Peer EV/EBITDA
+#                                         Sector median × 0.9 maturity disc.
+#                                     Outputs: p_g, p_c, p_e, avg_int, mos_pct
+#
+#  ── FRONTEND (UI rendering, inside tab blocks) ─────────────────────────────
+#
+#  SECTION 10  Results Display        Valuation summary card (price vs range),
+#  (tab_model)                        rating, PDF download, and three bridge
+#                                     tables showing EV → equity walk for
+#                                     each method.
+#
+#  TAB 1  Base Data                   Editable Year 0 financials form.
+#                                     Yahoo-imported values, user can override.
+#
+#  TAB 2  DCF Model                   FCF projection table + Section 10 output.
+#
+#  TAB 3  Returns & Sensitivity       Rate-of-return table (entry price ×
+#                                     horizon), required growth solver,
+#                                     WACC/LTG sensitivity heatmap,
+#                                     Monte Carlo simulation (correlated
+#                                     multivariate normal draws).
+#
+#  TAB 4  Historical                  4-year revenue/margin/FCF table with
+#                                     trend charts and CAGR vs model callout.
+#
+#  TAB 5  Comparables                 Sector peer EV/EBITDA and P/E table
+#                                     with peer median vs exit multiple badge.
+#
+#  VALUATION COMPASS                  Displayed above tabs after ticker load.
+#                                     Maps Yahoo sector → recommended methods
+#                                     with PRIMARY / SECONDARY / CAUTION /
+#                                     AVOID ratings. Covers 11 sector profiles.
+#
+#  KEY DESIGN DECISIONS
+#  ---------------------------------------------------------------------------
+#  • All computation runs OUTSIDE tab blocks so every tab shares the same
+#    model state — no stale values when switching tabs.
+#  • edited_df (the user-editable table) overrides formula projections in
+#    Section 9, allowing manual scenario overrides without breaking the model.
+#  • safe_ltg = min(ltg, wacc - 0.015) prevents the Gordon Growth denominator
+#    going negative (which would produce nonsensical results).
+#  • Mid-year discounting ((1+wacc)^-(y-0.5)) is used throughout — more
+#    accurate than end-of-year for businesses with continuous cash flows.
+#  • SBC toggle: when ON (default), SBC is NOT added back to FCF because
+#    EBIT already has it deducted — adding it back would double-count it.
+#  • Peer comps are fetched in parallel (ThreadPoolExecutor, 5 workers) to
+#    avoid the ~8s sequential Yahoo API delay on first load.
+#  • @st.cache_data(ttl=3600) means data only re-fetches once per hour per
+#    ticker, even across rerenders triggered by slider/input changes.
+#
+#  DEPENDENCIES
+#  ---------------------------------------------------------------------------
+#  streamlit, pandas, numpy, yfinance, reportlab
+# =============================================================================
+
 # ==========================================
-# 1. CONFIGURATION & STYLING
+# SECTION 1 — CONFIGURATION & STYLING
+# Sets page layout, injects custom dark-theme CSS via st.markdown.
 # ==========================================
 st.set_page_config(page_title="Pro DCF Valuation Tool", layout="wide", initial_sidebar_state="expanded")
 
@@ -46,7 +157,9 @@ th { text-align: center !important; }
 st.markdown('<h1 style="text-align:center; margin-bottom: 30px;">Pro DCF Valuation Tool</h1>', unsafe_allow_html=True)
 
 # ==========================================
-# 2. PDF GENERATION ENGINE
+# SECTION 2 — PDF GENERATION ENGINE
+# create_pdf(): builds a one-page valuation report using ReportLab.
+# Called in Section 10 when valuation results are available.
 # ==========================================
 def create_pdf(ticker, date, price, int_val, upside, wacc, ltg, exit_m, c_curr):
     """Generates a downloadable PDF report"""
@@ -82,7 +195,9 @@ def create_pdf(ticker, date, price, int_val, upside, wacc, ltg, exit_m, c_curr):
     return buffer
 
 # ==========================================
-# 3. HELPER FUNCTIONS
+# SECTION 3 — HELPER FUNCTIONS
+# fmt_comma(): formats a float as a comma-separated string.
+# clean_currency(): strips currency symbols and parses user text inputs back to float.
 # ==========================================
 def fmt_comma(val):
     if pd.isna(val) or np.isnan(val): return "0.00"
@@ -98,7 +213,11 @@ def clean_currency(val, symbol="$"):
     except: return 0.0
 
 # ==========================================
-# 4. DATA ENGINE (NAN-PROOF)
+# SECTION 4 — DATA ENGINE
+# get_yahoo_data(ticker): single cached function that fetches everything from Yahoo.
+# Cached @st.cache_data(ttl=3600) — only re-runs once per hour per ticker.
+# Returns: financials, price, shares, FX, historical 4yr data, peer comps, company name.
+# Peer comps are fetched in parallel via ThreadPoolExecutor (5 workers).
 # ==========================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_yahoo_data(ticker):
@@ -341,7 +460,10 @@ def get_yahoo_data(ticker):
         return None, 0.0, 1.0, f"Connection Error: {str(e)}", "USD", "Unknown", None, "Unknown", [], [], ""
 
 # ==========================================
-# 5. UI: INPUTS & SETUP
+# SECTION 5 — INPUT SETUP & SESSION STATE
+# Handles ticker input, unpacks get_yahoo_data() into session_state,
+# resolves currency symbol, renders company name banner,
+# and runs the Valuation Compass (sector-aware method guidance).
 # ==========================================
 c_tick, c_space, c_pdf = st.columns([1, 4, 1], vertical_alignment="bottom")
 
@@ -424,10 +546,194 @@ if company_name_display and ticker:
     </div>
     """, unsafe_allow_html=True)
 
+# ==========================================
+# VALUATION COMPASS
+# ==========================================
+if ticker and st.session_state.get('company_name'):
+    _sector   = st.session_state.get('industry', 'Unknown')
+    _industry = st.session_state.get('industry', 'Unknown')
+
+    # Map sector → method guidance
+    # Each method: (label, status, note)
+    # status: "primary" | "secondary" | "caution" | "avoid"
+    COMPASS = {
+        'Semiconductors': [
+            ("DCF",           "primary",   "Core method — predictable capex cycle"),
+            ("EV/EBITDA",     "primary",   "Standard acquisition & peer metric"),
+            ("EV/Revenue",    "secondary", "Useful when margins are depressed"),
+            ("P/E",           "caution",   "Distorted by amortization of acquisitions"),
+            ("DDM",           "avoid",     "Most semis pay little/no dividend"),
+            ("P/Book",        "avoid",     "Asset base not reflective of value"),
+        ],
+        'Technology': [
+            ("DCF",           "primary",   "Best for mature profitable tech"),
+            ("EV/EBITDA",     "primary",   "Peer comparison standard"),
+            ("EV/Revenue",    "secondary", "Use if margins are still low/negative"),
+            ("P/E",           "caution",   "GAAP EPS often distorted by SBC & amort."),
+            ("DDM",           "avoid",     "Growth companies rarely pay dividends"),
+            ("P/Book",        "avoid",     "Intangibles dominate — book is meaningless"),
+        ],
+        'Software—Application': [
+            ("DCF",           "primary",   "Use unlevered FCF — SaaS is predictable"),
+            ("EV/Revenue",    "primary",   "Market standard for SaaS multiples"),
+            ("EV/EBITDA",     "secondary", "Only if company is profitable"),
+            ("P/E",           "caution",   "SBC & amortization distort GAAP EPS"),
+            ("DDM",           "avoid",     "SaaS companies reinvest, don't pay divs"),
+            ("P/Book",        "avoid",     "Pure intangible business"),
+        ],
+        'Banks—Diversified': [
+            ("P/Book",        "primary",   "Core bank valuation metric"),
+            ("P/E",           "primary",   "Clean earnings metric for banks"),
+            ("DDM",           "secondary", "Works well for dividend-paying banks"),
+            ("DCF",           "caution",   "Hard to separate capex from lending"),
+            ("EV/EBITDA",     "avoid",     "Meaningless for financials — debt is product"),
+            ("EV/Revenue",    "avoid",     "Not applicable to financial business model"),
+        ],
+        'Insurance': [
+            ("P/Book",        "primary",   "Tangible book drives insurance value"),
+            ("P/E",           "primary",   "Normalized earnings are clean"),
+            ("DDM",           "secondary", "Insurers are reliable dividend payers"),
+            ("DCF",           "caution",   "Reserve uncertainty makes FCF noisy"),
+            ("EV/EBITDA",     "avoid",     "Not applicable to insurance model"),
+            ("EV/Revenue",    "avoid",     "Premium revenue ≠ economic value"),
+        ],
+        'Utilities—Regulated Electric': [
+            ("DDM",           "primary",   "Regulated utilities = bond-like dividends"),
+            ("DCF",           "primary",   "Stable, forecastable FCF"),
+            ("EV/EBITDA",     "secondary", "Rate base multiples are standard"),
+            ("P/E",           "secondary", "Useful for regulated rate-of-return cos."),
+            ("P/Book",        "caution",   "Rate base ≠ book value"),
+            ("EV/Revenue",    "avoid",     "Revenue regulated — not a value driver"),
+        ],
+        'Real Estate': [
+            ("P/FFO",         "primary",   "FFO (Funds from Ops) is the REIT standard"),
+            ("DCF",           "primary",   "NAV-based DCF is widely used"),
+            ("EV/EBITDA",     "secondary", "Useful for non-REIT real estate cos."),
+            ("DDM",           "secondary", "REITs must pay 90% of income as divs"),
+            ("P/E",           "avoid",     "Depreciation destroys GAAP EPS for REITs"),
+            ("P/Book",        "avoid",     "Book value lags property market values"),
+        ],
+        'Oil & Gas E&P': [
+            ("EV/EBITDA",     "primary",   "Industry standard — EV/EBITDAX common"),
+            ("DCF",           "primary",   "Reserve-based NAV DCF is standard"),
+            ("EV/Revenue",    "secondary", "Useful when EBITDA is negative"),
+            ("P/E",           "caution",   "DD&A and impairments distort EPS badly"),
+            ("DDM",           "caution",   "Only for mature producers with stable divs"),
+            ("P/Book",        "avoid",     "Reserve values not on balance sheet"),
+        ],
+        'Drug Manufacturers': [
+            ("DCF",           "primary",   "Pipeline NPV is core — risk-adjust each drug"),
+            ("EV/EBITDA",     "primary",   "Standard for large pharma"),
+            ("P/E",           "secondary", "Works for profitable mature pharma"),
+            ("EV/Revenue",    "secondary", "Useful for pre-profit biotech"),
+            ("DDM",           "caution",   "Only large pharma pays reliable dividends"),
+            ("P/Book",        "avoid",     "Intangibles (patents) dominate"),
+        ],
+        'Consumer Defensive': [
+            ("DCF",           "primary",   "Stable cash flows make DCF reliable"),
+            ("P/E",           "primary",   "Clean, predictable earnings"),
+            ("EV/EBITDA",     "secondary", "Good peer comparison tool"),
+            ("DDM",           "secondary", "Staples are reliable dividend payers"),
+            ("EV/Revenue",    "caution",   "Low-margin business — revenue alone misleading"),
+            ("P/Book",        "avoid",     "Brand value not on balance sheet"),
+        ],
+        'Industrials': [
+            ("EV/EBITDA",     "primary",   "Capex-heavy — EBITDA strips out depreciation"),
+            ("DCF",           "primary",   "Works well with stable FCF"),
+            ("P/E",           "secondary", "Good for mature, profitable industrials"),
+            ("EV/Revenue",    "caution",   "Low margins make revenue multiples unreliable"),
+            ("DDM",           "caution",   "Only mature cos. with consistent dividends"),
+            ("P/Book",        "avoid",     "Asset values vary widely"),
+        ],
+    }
+
+    # Fuzzy match sector to compass key
+    matched_key = None
+    for key in COMPASS:
+        if key.lower() in _sector.lower() or _sector.lower() in key.lower():
+            matched_key = key
+            break
+    # Broader fallbacks
+    if not matched_key:
+        if any(x in _sector.lower() for x in ['bank','financial','credit','asset management']):
+            matched_key = 'Banks—Diversified'
+        elif any(x in _sector.lower() for x in ['utility','utilities','electric','gas distribution']):
+            matched_key = 'Utilities—Regulated Electric'
+        elif any(x in _sector.lower() for x in ['real estate','reit']):
+            matched_key = 'Real Estate'
+        elif any(x in _sector.lower() for x in ['oil','gas','energy','petroleum','e&p']):
+            matched_key = 'Oil & Gas E&P'
+        elif any(x in _sector.lower() for x in ['pharma','drug','biotech','health']):
+            matched_key = 'Drug Manufacturers'
+        elif any(x in _sector.lower() for x in ['software','saas','cloud','internet']):
+            matched_key = 'Software—Application'
+        elif any(x in _sector.lower() for x in ['tech','semi','chip','hardware','electronic']):
+            matched_key = 'Semiconductors'
+        elif any(x in _sector.lower() for x in ['consumer','food','beverage','household','staple']):
+            matched_key = 'Consumer Defensive'
+        elif any(x in _sector.lower() for x in ['industrial','aerospace','defence','machinery','transport']):
+            matched_key = 'Industrials'
+        else:
+            matched_key = 'Technology'  # generic fallback
+
+    methods = COMPASS[matched_key]
+
+    STATUS_STYLE = {
+        "primary":   ("✅", "#4ade80", "rgba(74,222,128,0.08)",  "PRIMARY"),
+        "secondary": ("🔵", "#60a5fa", "rgba(96,165,250,0.08)",  "SECONDARY"),
+        "caution":   ("⚠️", "#fb923c", "rgba(251,146,60,0.08)",  "CAUTION"),
+        "avoid":     ("❌", "#f87171", "rgba(248,113,113,0.06)", "AVOID"),
+    }
+
+    # Which methods are in use in this app
+    IN_MODEL = {"DCF", "EV/EBITDA"}
+
+    cards_html = ""
+    for method, status, note in methods:
+        icon, color, bg, label = STATUS_STYLE[status]
+        in_model_badge = (
+            '<span style="font-size:9px; background:rgba(96,165,250,0.2); color:#60a5fa; '
+            'border-radius:4px; padding:1px 5px; margin-left:6px; font-weight:700;">IN MODEL</span>'
+            if method in IN_MODEL else ""
+        )
+        cards_html += f"""
+        <div style="background:{bg}; border:1px solid {color}22; border-radius:8px;
+                    padding:10px 14px; display:flex; align-items:flex-start; gap:10px;">
+          <div style="font-size:16px; margin-top:1px;">{icon}</div>
+          <div style="flex:1;">
+            <div style="font-size:12px; font-weight:700; color:{color};">
+              {method}{in_model_badge}
+              <span style="font-size:9px; opacity:0.6; margin-left:6px; font-weight:600;
+                           background:rgba(255,255,255,0.05); border-radius:3px; padding:1px 4px;">
+                {label}
+              </span>
+            </div>
+            <div style="font-size:11px; opacity:0.65; margin-top:2px;">{note}</div>
+          </div>
+        </div>"""
+
+    st.markdown(f"""
+    <div style="background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.08);
+                border-radius:12px; padding:16px; margin-bottom:20px;">
+      <div style="font-size:11px; font-weight:700; letter-spacing:1px; opacity:0.5;
+                  text-transform:uppercase; margin-bottom:12px;">
+        🧭 Valuation Compass — {matched_key}
+      </div>
+      <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap:8px;">
+        {cards_html}
+      </div>
+      <div style="font-size:10px; opacity:0.35; margin-top:10px;">
+        "IN MODEL" = currently used in the DCF Model tab. Sector matched to: <em>{_sector}</em>.
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
 date_display = st.session_state.get('file_date', 'Unknown')
 
 # ==========================================
 # MAIN TAB LAYOUT
+# Five tabs defined here. All computation above already ran.
+# Tabs only contain rendering code — no calculations inside tab blocks.
 # ==========================================
 tab_data, tab_model, tab_returns, tab_hist, tab_comp = st.tabs([
     "📋 Base Data",
@@ -437,7 +743,10 @@ tab_data, tab_model, tab_returns, tab_hist, tab_comp = st.tabs([
     "🏢 Comparables",
 ])
 
-# ── TAB 1: BASE DATA ──────────────────────
+# TAB 1 — BASE DATA
+# Editable form for Year 0 financials imported from Yahoo.
+# User can override Revenue, EBIT, D&A, Capex, Debt, Cash, Shares, SBC, NWC.
+# Form submit updates session_state so changes persist across rerenders.
 with tab_data:
     st.markdown(f"#### Year 0 Financials (Ended {date_display})")
     st.caption("Figures imported from Yahoo Finance. Unlock to override any value.")
@@ -477,7 +786,11 @@ with tab_data:
             st.session_state.y0['ChangeInWC'] = nwc_in
 
 # ==========================================
-# 6. SCENARIO & DRIVERS (SIDEBAR)
+# SECTION 6 — SIDEBAR: SCENARIO & DRIVERS
+# Scenario presets (Bull/Bear/Base) apply multipliers to growth and margin defaults.
+# WACC auto-calculated via CAPM (beta × ERP + risk-free + country risk).
+# All outputs (wacc, g_rev, margin_tgt, tax_rate, ltg, cap_r, dep_r, nwc_r, sbc_r_fcf)
+# are plain Python variables used directly in Sections 7–9.
 # ==========================================
 with st.sidebar:
     st.header("Configuration")
@@ -621,7 +934,11 @@ with st.sidebar:
         sbc_r_fcf = sbc_r
 
 # ==========================================
-# 7. CALCULATION ENGINE — 10-YEAR TWO-PHASE
+# SECTION 7 — CALCULATION ENGINE (10-YEAR TWO-PHASE DCF)
+# Builds df_base: Year 0 actuals + Years 1–10 projections.
+# Growth decays linearly from g_rev (Year 1) to safe_ltg (Year 10).
+# Uses margin_tgt, dep_r, cap_r, nwc_r, sbc_r_fcf ratios from Section 6.
+# Output: df_base (DataFrame) used by the editable table in Section 8.
 # ==========================================
 # Phase 1 (Y1–5): explicit forecast at user growth, decaying toward mid-growth
 # Phase 2 (Y6–10): growth continues decaying from mid-growth to terminal rate
@@ -665,7 +982,11 @@ else:
 df_base = pd.DataFrame(base_data).set_index('Year')
 
 # ==========================================
-# 8. INTERACTIVE TABLE  (rendered inside tab_model)
+# SECTION 8 — INTERACTIVE FCF TABLE (renders in tab_model)
+# Displays df_base as an editable st.data_editor.
+# When Unlock toggle is ON, users can override any projected cell.
+# edited_df captures user overrides and feeds directly into Section 9.
+# Reset button increments reset_key, forcing df_base to regenerate.
 # ==========================================
 with tab_model:
     c_title, c_space, c_tools = st.columns([5, 3, 2], vertical_alignment="bottom")
@@ -693,7 +1014,13 @@ with tab_model:
     )
 
 # ==========================================
-# 9. VALUATION LOGIC — THREE INDEPENDENT METHODS
+# SECTION 9 — VALUATION LOGIC (THREE INDEPENDENT METHODS)
+# Reads from edited_df (respects any manual overrides from Section 8).
+# Method 1 (40%): Gordon Growth — 10yr FCF + normalized Gordon terminal.
+# Method 2 (30%): Conservative DCF — WACC+1.5%, LTG floored at 2% GDP.
+# Method 3 (30%): Peer EV/EBITDA — sector median × 0.9 maturity discount.
+# Weighted intrinsic value → avg_int. Upside → mos_pct.
+# All three EVs and equity prices available for bridge tables in Section 10.
 #    Method 1 (40%): 10yr DCF + Gordon Growth terminal
 #    Method 2 (30%): 10yr DCF + Conservative (WACC+1.5%, LTG floored at 2%)
 #    Method 3 (30%): 10yr DCF + Peer-relative EV/EBITDA terminal (sector median)
@@ -785,7 +1112,10 @@ except Exception as e:
 
 
 # ==========================================
-# 10. RESULTS VISUALIZATION  (inside tab_model)
+# SECTION 10 — RESULTS VISUALIZATION (renders in tab_model)
+# Summary card: current price vs intrinsic range, rating, PDF download button.
+# Three bridge cards (one per method) showing: PV FCFs → EV → net debt → equity.
+# Method labels show weights and data source (peer multiple or fallback).
 # ==========================================
 with tab_model:
     st.divider()
@@ -900,7 +1230,16 @@ with tab_model:
     else:
         st.info("👈 Enter a ticker and configure your assumptions to see valuation results.")
 
-# ── TAB 3: RETURNS & SENSITIVITY ──────────
+# TAB 3 — RETURNS & SENSITIVITY
+# Part A: Rate-of-return table — rows = entry prices (±40% of current),
+#          columns = time horizons (1/2/3/5/7/10yr), cells = implied CAGR.
+#          Green = beats WACC hurdle, amber = positive but sub-WACC, red = negative.
+# Part B: Required growth solver — binary search for the revenue CAGR
+#          that makes intrinsic value = current price.
+# Part C: Sensitivity heatmap — 5×5 grid of WACC vs terminal growth.
+# Part D: Monte Carlo — correlated multivariate normal draws across
+#          growth, margin, WACC. Runs 1k–10k simulations. Shows histogram
+#          and P10/P50/P90 percentiles.
 with tab_returns:
 
     # ---- Rate of Return ----
@@ -1160,7 +1499,10 @@ with tab_returns:
                 </div>
                 """, unsafe_allow_html=True)
 
-# ── TAB 4: HISTORICAL ─────────────────────
+# TAB 4 — HISTORICAL FINANCIALS
+# Shows 4 years of actual revenue, EBIT margin, D&A, Capex, SBC, FCFF.
+# Revenue and margin trend charts. CAGR callout vs modelled growth assumption.
+# Data sourced from get_yahoo_data() hist_data, stored in session_state.
 with tab_hist:
     hist_rows = st.session_state.get('hist_data', [])
     if hist_rows:
@@ -1197,7 +1539,11 @@ with tab_hist:
     else:
         st.info("Enter a ticker above to load historical financials.")
 
-# ── TAB 5: COMPARABLES ────────────────────
+# TAB 5 — PEER COMPARABLES
+# Sector peers fetched in parallel during get_yahoo_data().
+# Table shows EV/EBITDA, P/E, market cap for up to 5 peers.
+# Peer median EV/EBITDA badge vs your exit multiple with pass/warn indicator.
+# This median feeds directly into Method 3 of the valuation (Section 9).
 with tab_comp:
     comp_rows = st.session_state.get('comp_data', [])
     if comp_rows:
