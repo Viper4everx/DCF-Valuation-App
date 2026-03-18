@@ -273,20 +273,18 @@ def get_yahoo_data(ticker):
             hist_data = []
 
         # ==========================================
-        # COMPARABLES: sector peers from Yahoo
+        # COMPARABLES: sector peers from Yahoo (parallelized)
         # ==========================================
         comp_data = []
         try:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
             sector = info.get('sector', '')
-            # Yahoo provides a list of similar companies via recommendations
             recs = tk.recommendations
             peer_tickers = []
             if recs is not None and not recs.empty:
                 if 'symbol' in recs.columns:
                     peer_tickers = recs['symbol'].dropna().unique().tolist()[:6]
-                elif 'toGrade' in recs.columns:
-                    pass
-            # Fallback: use a small hard-coded sector map
             if not peer_tickers:
                 sector_peers = {
                     'Technology': ['MSFT','GOOGL','META','AMZN','AAPL'],
@@ -303,24 +301,37 @@ def get_yahoo_data(ticker):
                 }
                 peer_tickers = [t for t in sector_peers.get(sector, ['SPY','QQQ','IWM','VTI','DIA']) if t != ticker][:5]
 
-            for pt in peer_tickers[:5]:
+            def fetch_peer(pt):
                 try:
                     pi = yf.Ticker(pt).info
-                    if pi is None: continue
-                    ev_eb = pi.get('enterpriseToEbitda')
-                    pe    = pi.get('trailingPE')
-                    name  = pi.get('shortName', pt)[:20]
+                    if pi is None: return None
+                    ev_eb  = pi.get('enterpriseToEbitda')
+                    pe     = pi.get('trailingPE')
+                    name   = pi.get('shortName', pt)[:20]
                     mktcap = pi.get('marketCap', 0) or 0
                     if ev_eb and not np.isnan(float(ev_eb)) and float(ev_eb) > 0:
-                        comp_data.append({
+                        return {
                             'Ticker': pt,
                             'Name': name,
                             'EV/EBITDA': round(float(ev_eb), 1),
                             'P/E': round(float(pe), 1) if pe and not np.isnan(float(pe)) else None,
                             'Mkt Cap $B': round(mktcap / 1e9, 1) if mktcap else None,
-                        })
+                        }
                 except Exception:
                     pass
+                return None
+
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                futures = {executor.submit(fetch_peer, pt): pt for pt in peer_tickers[:5]}
+                for future in as_completed(futures):
+                    result = future.result()
+                    if result is not None:
+                        comp_data.append(result)
+
+            # Re-sort to match original peer_tickers order
+            order = {pt: i for i, pt in enumerate(peer_tickers[:5])}
+            comp_data.sort(key=lambda r: order.get(r['Ticker'], 99))
+
         except Exception:
             comp_data = []
 
@@ -858,31 +869,49 @@ with tab_returns:
         ror_col1, ror_col2 = st.columns(2)
 
         with ror_col1:
-            st.markdown("**Implied Annual Return (if intrinsic value is correct)**")
-            cagr_5  = (avg_int / cur_price) ** (1/5)  - 1
-            cagr_3  = (avg_int / cur_price) ** (1/3)  - 1
-            cagr_10 = (avg_int / cur_price) ** (1/10) - 1
-            color_5 = "#4ade80" if cagr_5 > wacc else "#f87171"
-            st.markdown(f"""
-            <div style="display:flex; gap:16px; flex-wrap:wrap;">
-              <div class="glass-card" style="flex:1; text-align:center; padding:14px;">
-                <div class="val-label">3-Year CAGR</div>
-                <div style="font-size:28px; font-weight:700; color:{color_5};">{cagr_3:+.1%}</div>
-              </div>
-              <div class="glass-card" style="flex:1; text-align:center; padding:14px;">
-                <div class="val-label">5-Year CAGR</div>
-                <div style="font-size:28px; font-weight:700; color:{color_5};">{cagr_5:+.1%}</div>
-              </div>
-              <div class="glass-card" style="flex:1; text-align:center; padding:14px;">
-                <div class="val-label">10-Year CAGR</div>
-                <div style="font-size:28px; font-weight:700; color:{color_5};">{cagr_10:+.1%}</div>
-              </div>
-            </div>
-            <div style="font-size:11px; opacity:0.5; margin-top:4px;">
-              CAGR assumes price converges to intrinsic value ({curr_symbol}{avg_int:,.2f}) over the horizon.
-              WACC hurdle: {wacc:.1%}
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown("**Rate of Return by Entry Price & Horizon**")
+            st.caption(f"Assumes stock converges to intrinsic value ({curr_symbol}{avg_int:,.2f}). Green = beats WACC hurdle ({wacc:.1%}).")
+
+            horizons = [1, 2, 3, 5, 7, 10]
+            # Entry prices: -40% to +20% of current price in steps, always include current
+            offsets = [-0.40, -0.30, -0.20, -0.10, 0.0, +0.10, +0.20]
+            entry_prices = [cur_price * (1 + o) for o in offsets]
+
+            # Build table rows
+            ror_rows = []
+            for ep in entry_prices:
+                row = {}
+                label = f"{curr_symbol}{ep:,.2f}"
+                if abs(ep - cur_price) < 0.01:
+                    label += " ◀ now"
+                row["Entry Price"] = label
+                for h in horizons:
+                    if avg_int > 0 and ep > 0:
+                        cagr = (avg_int / ep) ** (1/h) - 1
+                    else:
+                        cagr = 0.0
+                    row[f"{h}yr"] = cagr
+                ror_rows.append(row)
+
+            df_ror = pd.DataFrame(ror_rows).set_index("Entry Price")
+
+            # Style: green if > wacc, red if < 0, amber in between
+            def style_ror(val):
+                if val >= wacc:
+                    intensity = min(int((val - wacc) / wacc * 200), 120)
+                    return f'background-color: rgba(74,222,128,{0.15 + intensity/600:.2f}); color: #4ade80; font-weight:700;'
+                elif val >= 0:
+                    return 'background-color: rgba(251,146,60,0.15); color: #fb923c; font-weight:600;'
+                else:
+                    return 'background-color: rgba(248,113,113,0.15); color: #f87171; font-weight:600;'
+
+            st.dataframe(
+                df_ror.style
+                    .format("{:+.1%}")
+                    .map(style_ror),
+                use_container_width=True,
+                height=300,
+            )
 
         with ror_col2:
             st.markdown("**Revenue Growth Required to Justify Current Price**")
