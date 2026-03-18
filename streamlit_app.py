@@ -621,54 +621,46 @@ with st.sidebar:
         sbc_r_fcf = sbc_r
 
 # ==========================================
-# 7. CALCULATION ENGINE (SMART DECAY)
+# 7. CALCULATION ENGINE — 10-YEAR TWO-PHASE
 # ==========================================
-years = range(1, 6)
+# Phase 1 (Y1–5): explicit forecast at user growth, decaying toward mid-growth
+# Phase 2 (Y6–10): growth continues decaying from mid-growth to terminal rate
+years = range(1, 11)
 base_data = []
 
-safe_ltg = ltg if ltg < (wacc - 0.015) else (wacc - 0.015)
+safe_ltg = min(ltg, wacc - 0.015)
 
 if r_in > 0:
     nopat0 = e_in * (1 - tax_rate)
-    # Year 0 Change in WC comes from statement (nwc_in)
-    fcff0 = nopat0 + d_in - c_in + nwc_in + sbc_in 
-    
-    base_data.append({'Year': 0, 'Revenue': r_in, 'EBIT': e_in, 'NOPAT': nopat0, 'D&A': d_in, 'Capex': c_in, 'Change in NWC': nwc_in, 'FCFF': fcff0, 'PV': 0.0})
+    fcff0  = nopat0 + d_in - c_in + nwc_in
+    base_data.append({'Year': 0, 'Revenue': r_in, 'EBIT': e_in, 'NOPAT': nopat0,
+                       'D&A': d_in, 'Capex': c_in, 'Change in NWC': nwc_in, 'FCFF': fcff0, 'PV': 0.0})
 
     prev_rev = r_in
-
-    growth_decay_step = 0.0
-    if g_rev > safe_ltg:
-        target_y5_growth = (g_rev + safe_ltg) / 2 
-        growth_decay_step = (g_rev - target_y5_growth) / 4 
-    
+    # Decay: Y1 starts at g_rev, reaches safe_ltg by Y10
     for y in years:
-        current_g = g_rev - (growth_decay_step * (y - 1))
-        if current_g < safe_ltg: current_g = safe_ltg
-        
-        rev = prev_rev * (1 + current_g)
-        ebit = rev * margin_tgt
+        # Linear decay from g_rev (Y1) to safe_ltg (Y10)
+        current_g = g_rev + (safe_ltg - g_rev) * ((y - 1) / 9)
+        current_g = max(current_g, safe_ltg)
+
+        rev   = prev_rev * (1 + current_g)
+        ebit  = rev * margin_tgt
         nopat = ebit * (1 - tax_rate)
-        
-        # Use Global Ratios
-        da = rev * dep_r
+        da    = rev * dep_r
         capex = rev * cap_r
-        
-        # AUTO CALCULATE NWC based on Sidebar Driver
-        dnwc = (rev - prev_rev) * nwc_r
-        
+        dnwc  = (rev - prev_rev) * nwc_r
         sbc_proj = rev * sbc_r_fcf
-        
-        fcff = nopat + da - capex - dnwc + sbc_proj
-        
-        # Mid-year discount
-        pv = fcff * ((1 + wacc)**-(y - 0.5))
-        
-        # ADDED 'Change in NWC' to the dataframe
-        base_data.append({'Year':y,'Revenue':rev,'EBIT':ebit,'NOPAT':nopat,'D&A':da,'Capex':capex, 'Change in NWC': dnwc, 'FCFF':fcff,'PV':pv})
+        fcff  = nopat + da - capex - dnwc + sbc_proj
+
+        pv = fcff * ((1 + wacc)**-(y - 0.5))  # mid-year convention
+
+        base_data.append({'Year': y, 'Revenue': rev, 'EBIT': ebit, 'NOPAT': nopat,
+                           'D&A': da, 'Capex': capex, 'Change in NWC': dnwc, 'FCFF': fcff, 'PV': pv})
         prev_rev = rev
 else:
-    for y in range(0, 6): base_data.append({'Year':y,'Revenue':0.0,'EBIT':0.0,'NOPAT':0.0,'D&A':0.0,'Capex':0.0,'Change in NWC':0.0,'FCFF':0.0,'PV':0.0})
+    for y in range(0, 11):
+        base_data.append({'Year': y, 'Revenue': 0.0, 'EBIT': 0.0, 'NOPAT': 0.0,
+                           'D&A': 0.0, 'Capex': 0.0, 'Change in NWC': 0.0, 'FCFF': 0.0, 'PV': 0.0})
 
 df_base = pd.DataFrame(base_data).set_index('Year')
 
@@ -686,7 +678,7 @@ with tab_model:
                 st.session_state.reset_key += 1
                 st.rerun()
 
-    display_cols = [f"Year {y}" for y in range(6)]
+    display_cols = [f"Year {y}" for y in range(11)]
     disabled_cols = display_cols if not is_unlocked else ["Year 0"]
 
     df_display = df_base.T
@@ -701,75 +693,95 @@ with tab_model:
     )
 
 # ==========================================
-# 9. VALUATION LOGIC
+# 9. VALUATION LOGIC — THREE INDEPENDENT METHODS
+#    Method 1 (40%): 10yr DCF + Gordon Growth terminal
+#    Method 2 (30%): 10yr DCF + Conservative (WACC+1.5%, LTG floored at 2%)
+#    Method 3 (30%): 10yr DCF + Peer-relative EV/EBITDA terminal (sector median)
 # ==========================================
 try:
     fcf_stream = []
     for y in years:
         col_name = f"Year {y}"
-        rev_edit = clean_currency(edited_df.loc['Revenue', col_name], curr_symbol)
-        ebit_edit = clean_currency(edited_df.loc['EBIT', col_name], curr_symbol)
-        da_edit = clean_currency(edited_df.loc['D&A', col_name], curr_symbol)
-        capex_edit = clean_currency(edited_df.loc['Capex', col_name], curr_symbol)
-        
-        # FIX: READ NWC from Editor (allows Manual Adjustment)
-        # If the user edited the table, this value takes precedence over the formula.
+        rev_edit   = clean_currency(edited_df.loc['Revenue',      col_name], curr_symbol)
+        ebit_edit  = clean_currency(edited_df.loc['EBIT',         col_name], curr_symbol)
+        da_edit    = clean_currency(edited_df.loc['D&A',          col_name], curr_symbol)
+        capex_edit = clean_currency(edited_df.loc['Capex',        col_name], curr_symbol)
+
         try:
-            dnwc_read = clean_currency(edited_df.loc['Change in NWC', col_name], curr_symbol)
-            dnwc_final = dnwc_read
+            dnwc_final = clean_currency(edited_df.loc['Change in NWC', col_name], curr_symbol)
         except:
-            prev_col = f"Year {y-1}"
-            rev_prev = clean_currency(edited_df.loc['Revenue', prev_col], curr_symbol)
+            prev_col   = f"Year {y-1}"
+            rev_prev   = clean_currency(edited_df.loc['Revenue', prev_col], curr_symbol)
             dnwc_final = (rev_edit - rev_prev) * nwc_r
 
-        sbc_proj = rev_edit * sbc_r_fcf
-        
-        nopat = ebit_edit * (1 - tax_rate)
-        # Recalc FCF
+        sbc_proj    = rev_edit * sbc_r_fcf
+        nopat       = ebit_edit * (1 - tax_rate)
         fcff_recalc = nopat + da_edit - capex_edit - dnwc_final + sbc_proj
-        
-        # Mid-year discount
-        pv_recalc = fcff_recalc * ((1 + wacc)**-(y - 0.5))
+        pv_recalc   = fcff_recalc * ((1 + wacc)**-(y - 0.5))
         fcf_stream.append(pv_recalc)
-        
-        if y == 5:
-            fcf5_final = fcff_recalc
-            ebitda5_final = ebit_edit + da_edit
-            da5_final = da_edit 
+
+        if y == 10:
+            ebitda10_final = ebit_edit + da_edit
+            da10_final     = da_edit
 
     sum_pv_final = sum(fcf_stream)
-    
-    term_nopat = ebitda5_final * (1 - tax_rate) 
-    term_capex = da5_final * term_cap_ratio
-    fcf5_normalized = (ebitda5_final - da5_final)*(1-tax_rate) + da5_final - term_capex
-    
-    tv_g = fcf5_normalized * (1+safe_ltg)/(wacc-safe_ltg)
-    pv_tv_g = tv_g * ((1+wacc)**-5)
-    
-    wacc_cons = wacc + 0.01
-    safe_ltg_cons = safe_ltg if safe_ltg < (wacc_cons - 0.015) else (wacc_cons - 0.015)
-    tv_c = fcf5_normalized * (1+safe_ltg_cons)/(wacc_cons-safe_ltg_cons)
-    pv_tv_c = tv_c * ((1+wacc)**-5)
-    
-    tv_e = ebitda5_final * exit_mult
-    pv_tv_e = tv_e * ((1+wacc)**-5)
 
-    def get_price(pv_tv_val):
-        ev = sum_pv_final + pv_tv_val
-        eq = ev - (debt_in - cash_in)
-        return (eq / shares_in) if shares_in > 0 else 0, ev
+    # ── Normalized terminal FCF (Capex → maintenance level at Y10) ──
+    term_capex_norm    = da10_final * term_cap_ratio
+    fcf10_normalized   = (ebitda10_final - da10_final) * (1 - tax_rate) + da10_final - term_capex_norm
 
-    p_g, ev_g = get_price(pv_tv_g)
-    p_c, ev_c = get_price(pv_tv_c)
-    p_e, ev_e = get_price(pv_tv_e)
+    # ── Method 1: Gordon Growth (40%) ──
+    tv_g     = fcf10_normalized * (1 + safe_ltg) / (wacc - safe_ltg)
+    pv_tv_g  = tv_g * ((1 + wacc)**-10)
 
-    avg_int = (p_g + p_e + p_c) / 3 
-    if cur_price > 0: mos_pct = (avg_int - cur_price) / cur_price
-    else: mos_pct = 0.0
+    # ── Method 2: Conservative DCF (30%) ──
+    # WACC+1.5%, LTG floored at 2% (approx long-run nominal GDP)
+    wacc_cons    = wacc + 0.015
+    safe_ltg_cons = min(max(safe_ltg, 0.02), wacc_cons - 0.015)
+    tv_c         = fcf10_normalized * (1 + safe_ltg_cons) / (wacc_cons - safe_ltg_cons)
+    pv_tv_c      = tv_c * ((1 + wacc)**-10)   # discount at base WACC for comparability
+
+    # ── Method 3: Peer-relative EV/EBITDA (30%) ──
+    # Use sector median from comparables; fall back to user exit_mult only if no peers
+    comp_rows_val  = st.session_state.get('comp_data', [])
+    peer_multiples = [r['EV/EBITDA'] for r in comp_rows_val if r.get('EV/EBITDA')]
+    if peer_multiples:
+        peer_mult_med = float(np.median(peer_multiples))
+        # Apply a slight discount (10%) to the peer median — mature companies
+        # trade at a discount to the current sector average at terminal stage
+        terminal_mult = peer_mult_med * 0.90
+        mult_source   = f"Peer median {peer_mult_med:.1f}x × 0.9 discount"
+    else:
+        terminal_mult = exit_mult   # fall back to user input
+        mult_source   = f"User input {exit_mult:.1f}x (no peers loaded)"
+
+    tv_e    = ebitda10_final * terminal_mult
+    pv_tv_e = tv_e * ((1 + wacc)**-10)
+
+    # ── Bridge to equity value ──
+    net_debt = debt_in - cash_in
+
+    def get_equity_price(pv_tv):
+        ev = sum_pv_final + pv_tv
+        eq = ev - net_debt
+        return (eq / shares_in) if shares_in > 0 else 0.0, ev
+
+    p_g, ev_g = get_equity_price(pv_tv_g)
+    p_c, ev_c = get_equity_price(pv_tv_c)
+    p_e, ev_e = get_equity_price(pv_tv_e)
+
+    # ── Weighted intrinsic value ──
+    w1, w2, w3 = 0.40, 0.30, 0.30
+    avg_int = w1 * p_g + w2 * p_c + w3 * p_e
+    mos_pct = (avg_int - cur_price) / cur_price if cur_price > 0 else 0.0
 
 except Exception as e:
-    p_g, p_c, p_e, avg_int, mos_pct = 0,0,0,0,0
-    ev_g, ev_c, ev_e = 0,0,0
+    p_g, p_c, p_e, avg_int, mos_pct = 0, 0, 0, 0, 0
+    ev_g, ev_c, ev_e = 0, 0, 0
+    terminal_mult = exit_mult
+    mult_source   = "N/A"
+    sum_pv_final  = 0
+    pv_tv_g = pv_tv_c = pv_tv_e = 0
 
 
 # ==========================================
@@ -830,9 +842,10 @@ with tab_model:
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        def make_bridge(pv_fcf, pv_tv, ev, debt, cash, eq):
+        def make_bridge(pv_fcf, pv_tv, ev, debt, cash, eq, horizon=10):
             return pd.DataFrame({
-                "Component": ["PV of 5y Cash Flows", "PV of Terminal", "Enterprise Value", "Less: Net Debt", "Equity Value"],
+                "Component": [f"PV of {horizon}yr Cash Flows", "PV of Terminal Value",
+                               "Enterprise Value", "Less: Net Debt", "Equity Value"],
                 "Value": [pv_fcf, pv_tv, ev, debt - cash, eq]
             }).set_index("Component")
 
@@ -840,22 +853,49 @@ with tab_model:
         c_g, c_c, c_e = st.columns(3)
 
         with c_g:
-            st.markdown(f"""<div class="val-card border-purple"><div class="val-title">Perpetuity Growth</div><div class="val-sub">Stable {safe_ltg:.1%} long-term growth</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-purple">{curr_symbol}{p_g:,.2f}</div><div class="val-ev"><span>EV: </span><strong>{curr_symbol}{ev_g:,.2f}M</strong></div></div>""", unsafe_allow_html=True)
+            st.markdown(f"""<div class="val-card border-purple">
+              <div class="val-label">METHOD 1 · 40% WEIGHT</div>
+              <div class="val-title">Gordon Growth DCF</div>
+              <div class="val-sub">10yr explicit · {safe_ltg:.1%} terminal growth</div>
+              <div class="val-label">IMPLIED SHARE PRICE</div>
+              <div class="val-price text-purple">{curr_symbol}{p_g:,.2f}</div>
+              <div class="val-ev"><span>EV: </span><strong>{curr_symbol}{ev_g:,.2f}M</strong></div>
+            </div>""", unsafe_allow_html=True)
             st.markdown("<br>", unsafe_allow_html=True)
-            st.markdown("##### Bridge (Gordon)")
-            st.dataframe(make_bridge(sum_pv_final, pv_tv_g, ev_g, debt_in, cash_in, ev_g-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
+            st.markdown("##### Bridge (Gordon Growth)")
+            st.dataframe(make_bridge(sum_pv_final, pv_tv_g, ev_g, debt_in, cash_in,
+                         ev_g-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
 
         with c_c:
-            st.markdown(f"""<div class="val-card border-orange"><div class="val-title">Conservative Case 🛡️</div><div class="val-sub">Higher Discount Rate (WACC + 1%)</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-orange">{curr_symbol}{p_c:,.2f}</div><div class="val-ev"><span>EV: </span><strong>{curr_symbol}{ev_c:,.2f}M</strong></div></div>""", unsafe_allow_html=True)
+            st.markdown(f"""<div class="val-card border-orange">
+              <div class="val-label">METHOD 2 · 30% WEIGHT</div>
+              <div class="val-title">Conservative DCF 🛡️</div>
+              <div class="val-sub">WACC+1.5% · LTG floored at 2% (nominal GDP)</div>
+              <div class="val-label">IMPLIED SHARE PRICE</div>
+              <div class="val-price text-orange">{curr_symbol}{p_c:,.2f}</div>
+              <div class="val-ev"><span>EV: </span><strong>{curr_symbol}{ev_c:,.2f}M</strong></div>
+            </div>""", unsafe_allow_html=True)
             st.markdown("<br>", unsafe_allow_html=True)
             st.markdown("##### Bridge (Conservative)")
-            st.dataframe(make_bridge(sum_pv_final, pv_tv_c, ev_c, debt_in, cash_in, ev_c-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
+            st.dataframe(make_bridge(sum_pv_final, pv_tv_c, ev_c, debt_in, cash_in,
+                         ev_c-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
 
         with c_e:
-            st.markdown(f"""<div class="val-card border-green"><div class="val-title">Exit Multiple 💼</div><div class="val-sub">Based on {exit_mult}x EBITDA</div><div class="val-label">IMPLIED SHARE PRICE</div><div class="val-price text-green">{curr_symbol}{p_e:,.2f}</div><div class="val-ev"><span>EV: </span><strong>{curr_symbol}{ev_e:,.2f}M</strong></div></div>""", unsafe_allow_html=True)
+            st.markdown(f"""<div class="val-card border-green">
+              <div class="val-label">METHOD 3 · 30% WEIGHT</div>
+              <div class="val-title">Peer-Relative EV/EBITDA 🏢</div>
+              <div class="val-sub">{mult_source}</div>
+              <div class="val-label">IMPLIED SHARE PRICE</div>
+              <div class="val-price text-green">{curr_symbol}{p_e:,.2f}</div>
+              <div class="val-ev"><span>EV: </span><strong>{curr_symbol}{ev_e:,.2f}M</strong></div>
+            </div>""", unsafe_allow_html=True)
             st.markdown("<br>", unsafe_allow_html=True)
-            st.markdown("##### Bridge (Multiple)")
-            st.dataframe(make_bridge(sum_pv_final, pv_tv_e, ev_e, debt_in, cash_in, ev_e-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
+            st.markdown("##### Bridge (Peer EV/EBITDA)")
+            st.dataframe(make_bridge(sum_pv_final, pv_tv_e, ev_e, debt_in, cash_in,
+                         ev_e-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
+
+        st.caption(f"Weighted intrinsic value: 40% Gordon + 30% Conservative + 30% Peer EV/EBITDA. "
+                   f"Peer multiple: {mult_source}.")
 
     else:
         st.info("👈 Enter a ticker and configure your assumptions to see valuation results.")
@@ -975,34 +1015,47 @@ with tab_returns:
 
         def quick_dcf_calc(w, t_g, r_in=r_in, g_rev=g_rev, margin_tgt=margin_tgt,
                             tax_rate=tax_rate, dep_r=dep_r, cap_r=cap_r, nwc_r=nwc_r,
-                            sbc_r_fcf=sbc_r_fcf, exit_mult=exit_mult, term_cap_ratio=term_cap_ratio,
-                            debt_in=debt_in, cash_in=cash_in, shares_in=shares_in, safe_ltg=safe_ltg):
+                            sbc_r_fcf=sbc_r_fcf, term_cap_ratio=term_cap_ratio,
+                            terminal_mult=terminal_mult,
+                            debt_in=debt_in, cash_in=cash_in, shares_in=shares_in):
+            """Mirrors main model: 10yr linear decay, normalized terminal FCF,
+               blended Gordon (50%) + Peer EV/EBITDA (50%) terminal."""
             safe_t_g = min(t_g, w - 0.015)
-            growth_decay_step = 0.0
-            if g_rev > safe_t_g:
-                target_y5_growth = (g_rev + safe_t_g) / 2
-                growth_decay_step = (g_rev - target_y5_growth) / 4
-            fcf_pv_sum = 0.0; prev_rev = r_in; last_ebitda = 0.0; last_da = 0.0
-            for y in range(1, 6):
-                current_g = g_rev - (growth_decay_step * (y - 1))
-                if current_g < safe_t_g: current_g = safe_t_g
-                rev = prev_rev * (1 + current_g)
-                ebit = rev * margin_tgt; nopat = ebit * (1 - tax_rate)
-                da = rev * dep_r; capex = rev * cap_r
-                dnwc = (rev - prev_rev) * nwc_r; sbc_proj = rev * sbc_r_fcf
-                fcff = nopat + da - capex - dnwc + sbc_proj
+            fcf_pv_sum = 0.0
+            prev_rev   = r_in
+            ebitda10   = 0.0
+            da10       = 0.0
+
+            for y in range(1, 11):
+                current_g = g_rev + (safe_t_g - g_rev) * ((y - 1) / 9)
+                current_g = max(current_g, safe_t_g)
+                rev   = prev_rev * (1 + current_g)
+                ebit  = rev * margin_tgt
+                nopat = ebit * (1 - tax_rate)
+                da    = rev * dep_r
+                capex = rev * cap_r
+                dnwc  = (rev - prev_rev) * nwc_r
+                sbc   = rev * sbc_r_fcf
+                fcff  = nopat + da - capex - dnwc + sbc
                 fcf_pv_sum += fcff * ((1 + w)**-(y - 0.5))
                 prev_rev = rev
-                if y == 5: last_ebitda = ebit + da; last_da = da
-            term_capex = last_da * term_cap_ratio
-            fcf5_norm = (last_ebitda - last_da) * (1 - tax_rate) + last_da - term_capex
-            tv_g = fcf5_norm * (1 + safe_t_g) / (w - safe_t_g)
-            pv_tv_g = tv_g * ((1 + w)**-5)
-            tv_e = last_ebitda * exit_mult
-            pv_tv_e = tv_e * ((1 + w)**-5)
-            eq_g = (fcf_pv_sum + pv_tv_g) - (debt_in - cash_in)
-            eq_e = (fcf_pv_sum + pv_tv_e) - (debt_in - cash_in)
-            return ((eq_g + eq_e) / 2) / shares_in if shares_in > 0 else 0
+                if y == 10:
+                    ebitda10 = ebit + da
+                    da10     = da
+
+            term_capex  = da10 * term_cap_ratio
+            fcf10_norm  = (ebitda10 - da10) * (1 - tax_rate) + da10 - term_capex
+
+            tv_gordon   = fcf10_norm * (1 + safe_t_g) / (w - safe_t_g)
+            pv_gordon   = tv_gordon  * ((1 + w)**-10)
+            tv_peer     = ebitda10   * terminal_mult
+            pv_peer     = tv_peer    * ((1 + w)**-10)
+
+            # 50/50 blend of Gordon and peer for sensitivity (conservative mix)
+            pv_tv_blend = 0.50 * pv_gordon + 0.50 * pv_peer
+            ev  = fcf_pv_sum + pv_tv_blend
+            eq  = ev - (debt_in - cash_in)
+            return (eq / shares_in) if shares_in > 0 else 0
 
         wacc_range = [wacc - 0.01, wacc - 0.005, wacc, wacc + 0.005, wacc + 0.01]
         ltg_range  = [ltg  - 0.005, ltg  - 0.0025, ltg, ltg  + 0.0025, ltg  + 0.005]
@@ -1050,15 +1103,12 @@ with tab_returns:
                     g_sim = draws[i, 0]; m_sim = draws[i, 1]; w_sim = draws[i, 2]
                     pv_sum = 0.0; prev_rev_sim = r_in
                     safe_ltg_sim = min(ltg, w_sim - 0.015)
-                    growth_decay_step_sim = 0.0
-                    if g_sim > safe_ltg_sim:
-                        target_y5 = (g_sim + safe_ltg_sim) / 2
-                        growth_decay_step_sim = (g_sim - target_y5) / 4
-                    fcf5_sim = ebitda5_sim = da5_sim = 0.0
 
-                    for y in range(1, 6):
-                        current_g_sim = g_sim - (growth_decay_step_sim * (y - 1))
-                        if current_g_sim < safe_ltg_sim: current_g_sim = safe_ltg_sim
+                    ebitda10_sim = 0.0; da10_sim = 0.0
+
+                    for y in range(1, 11):
+                        current_g_sim = g_sim + (safe_ltg_sim - g_sim) * ((y - 1) / 9)
+                        current_g_sim = max(current_g_sim, safe_ltg_sim)
                         rev_sim   = prev_rev_sim * (1 + current_g_sim)
                         ebit_sim  = rev_sim * m_sim
                         nopat_sim = ebit_sim * (1 - tax_rate)
@@ -1066,23 +1116,32 @@ with tab_returns:
                         dnwc_sim  = (rev_sim - prev_rev_sim) * nwc_r
                         sbc_sim   = rev_sim * sbc_r_fcf
                         fcff_sim  = nopat_sim + da_sim - capex_sim - dnwc_sim + sbc_sim
-                        pv_sum   += fcff_sim * ((1 + w_sim)**-(y-0.5))
+                        pv_sum   += fcff_sim * ((1 + w_sim)**-(y - 0.5))
                         prev_rev_sim = rev_sim
-                        if y == 5: fcf5_sim = fcff_sim; ebitda5_sim = ebit_sim + da_sim; da5_sim = da_sim
+                        if y == 10: ebitda10_sim = ebit_sim + da_sim; da10_sim = da_sim
 
-                    term_capex_sim  = da5_sim * term_cap_ratio
-                    fcf5_norm_sim   = (ebitda5_sim - da5_sim)*(1-tax_rate) + da5_sim - term_capex_sim
-                    tv_g_sim        = fcf5_norm_sim * (1+safe_ltg_sim) / (w_sim-safe_ltg_sim)
-                    pv_tv_g_sim     = tv_g_sim * ((1+w_sim)**-5)
-                    tv_e_sim        = ebitda5_sim * exit_mult
-                    pv_tv_e_sim     = tv_e_sim * ((1+w_sim)**-5)
-                    w_cons_sim      = w_sim + 0.01
-                    safe_ltg_cons   = min(safe_ltg_sim, w_cons_sim - 0.015)
-                    tv_c_sim        = fcf5_norm_sim * (1+safe_ltg_cons) / (w_cons_sim-safe_ltg_cons)
-                    pv_tv_c_sim     = tv_c_sim * ((1+w_sim)**-5)
+                    # Terminal values
+                    term_capex_sim = da10_sim * term_cap_ratio
+                    fcf10_norm_sim = (ebitda10_sim - da10_sim)*(1-tax_rate) + da10_sim - term_capex_sim
+
+                    # Gordon Growth terminal
+                    tv_g_sim   = fcf10_norm_sim * (1+safe_ltg_sim) / (w_sim-safe_ltg_sim)
+                    pv_tv_g_sim = tv_g_sim * ((1+w_sim)**-10)
+
+                    # Conservative terminal (WACC+1.5%)
+                    w_cons_sim    = w_sim + 0.015
+                    sltg_c_sim    = min(max(safe_ltg_sim, 0.02), w_cons_sim - 0.015)
+                    tv_c_sim      = fcf10_norm_sim * (1+sltg_c_sim) / (w_cons_sim-sltg_c_sim)
+                    pv_tv_c_sim   = tv_c_sim * ((1+w_sim)**-10)
+
+                    # Peer EV/EBITDA terminal
+                    tv_e_sim      = ebitda10_sim * terminal_mult
+                    pv_tv_e_sim   = tv_e_sim * ((1+w_sim)**-10)
 
                     def _ep(tv): return ((pv_sum+tv-(debt_in-cash_in))/shares_in) if shares_in>0 else 0
-                    sim_results.append((_ep(pv_tv_g_sim) + _ep(pv_tv_c_sim) + _ep(pv_tv_e_sim)) / 3)
+                    # Weighted same as main model
+                    avg_share_price = 0.40*_ep(pv_tv_g_sim) + 0.30*_ep(pv_tv_c_sim) + 0.30*_ep(pv_tv_e_sim)
+                    sim_results.append(avg_share_price)
 
                 sim_df = pd.DataFrame(sim_results, columns=["Price"])
                 sim_df = sim_df[(sim_df['Price'] > 0) & (sim_df['Price'] < cur_price * 4)]
