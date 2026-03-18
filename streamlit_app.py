@@ -688,45 +688,28 @@ if ticker and st.session_state.get('company_name'):
     # Which methods are in use in this app
     IN_MODEL = {"DCF", "EV/EBITDA"}
 
-    cards_html = ""
-    for method, status, note in methods:
-        icon, color, bg, label = STATUS_STYLE[status]
-        in_model_badge = (
-            '<span style="font-size:9px; background:rgba(96,165,250,0.2); color:#60a5fa; '
-            'border-radius:4px; padding:1px 5px; margin-left:6px; font-weight:700;">IN MODEL</span>'
-            if method in IN_MODEL else ""
-        )
-        cards_html += f"""
-        <div style="background:{bg}; border:1px solid {color}22; border-radius:8px;
-                    padding:10px 14px; display:flex; align-items:flex-start; gap:10px;">
-          <div style="font-size:16px; margin-top:1px;">{icon}</div>
-          <div style="flex:1;">
-            <div style="font-size:12px; font-weight:700; color:{color};">
-              {method}{in_model_badge}
-              <span style="font-size:9px; opacity:0.6; margin-left:6px; font-weight:600;
-                           background:rgba(255,255,255,0.05); border-radius:3px; padding:1px 4px;">
-                {label}
-              </span>
-            </div>
-            <div style="font-size:11px; opacity:0.65; margin-top:2px;">{note}</div>
-          </div>
-        </div>"""
+    st.markdown(f"###### 🧭 Valuation Compass — *{matched_key}*")
 
-    st.markdown(f"""
-    <div style="background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.08);
-                border-radius:12px; padding:16px; margin-bottom:20px;">
-      <div style="font-size:11px; font-weight:700; letter-spacing:1px; opacity:0.5;
-                  text-transform:uppercase; margin-bottom:12px;">
-        🧭 Valuation Compass — {matched_key}
-      </div>
-      <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap:8px;">
-        {cards_html}
-      </div>
-      <div style="font-size:10px; opacity:0.35; margin-top:10px;">
-        "IN MODEL" = currently used in the DCF Model tab. Sector matched to: <em>{_sector}</em>.
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
+    cols = st.columns(3)
+    for i, (method, status, note) in enumerate(methods):
+        icon, color, bg, label = STATUS_STYLE[status]
+        badge = " `IN MODEL`" if method in IN_MODEL else ""
+        with cols[i % 3]:
+            st.markdown(
+                f"<div style='background:{bg}; border:1px solid {color}44; border-radius:8px; "
+                f"padding:10px 12px; margin-bottom:8px;'>"
+                f"<div style='font-size:12px; font-weight:700; color:{color};'>"
+                f"{icon} {method}"
+                f"<span style='font-size:9px; margin-left:6px; opacity:0.7;'>{label}</span>"
+                f"</div>"
+                f"<div style='font-size:11px; opacity:0.6; margin-top:3px;'>{note}</div>"
+                f"</div>",
+                unsafe_allow_html=True
+            )
+            if method in IN_MODEL:
+                st.caption("✦ used in this model")
+
+    st.caption(f"Sector matched to: *{_sector}*  |  ✅ Primary  🔵 Secondary  ⚠️ Caution  ❌ Avoid")
 
 date_display = st.session_state.get('file_date', 'Unknown')
 
