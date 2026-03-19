@@ -286,7 +286,7 @@ def get_yahoo_data(ticker):
         inc = tk.income_stmt
         bs = tk.balance_sheet
         cf = tk.cashflow
-        
+
         if inc.empty: raise ValueError("Yahoo Finance returned no data. You may be rate-limited.")
 
         try:
@@ -298,45 +298,65 @@ def get_yahoo_data(ticker):
         def get_val(df, keys):
             if df.empty: return 0.0
             for k in keys:
-                if k in df.index: 
+                if k in df.index:
                     val = df.loc[k].iloc[0]
                     if pd.isna(val) or np.isnan(val): return 0.0
                     return val
             return 0.0
 
-        # Determine the correct scale divisor.
-        # Yahoo returns financials in full units (e.g. actual dollars/yuan).
-        # We want millions for display. However, some tickers (notably foreign ADRs)
-        # already report in millions or thousands in Yahoo's API — detect via magnitude.
+        data = {}
+
+        # Auto-detect scale — Yahoo returns financials in different units depending on
+        # the company. Most large-caps return full units (divide by 1e6 to get $M),
+        # but some (e.g. Workday) return in thousands (divide by 1e3).
+        # We cross-check against market cap to resolve ambiguous cases.
         raw_rev = get_val(inc, ['Total Revenue', 'Total Net Sales'])
+
         if raw_rev == 0:
-            scale = 1e6   # can't detect, use default
-        elif raw_rev > 1e10:
-            scale = 1e6   # raw units (billions range) → divide by 1M to get $M
-        elif raw_rev > 1e7:
-            scale = 1e3   # already in thousands → divide by 1K to get $M
-        elif raw_rev > 1e4:
-            scale = 1.0   # already in millions → no division needed
+            scale = 1e6  # unknown, use default
+        elif raw_rev >= 1e10:
+            scale = 1e6  # clearly full units — >$10B in any unit system
+        elif raw_rev >= 1e6:
+            # Ambiguous: could be thousands ($1B–$10B revenue) or full units ($1M–$10M revenue)
+            # Use market cap to decide: if mkt cap >> raw_rev/1e3, it's thousands
+            try:
+                mkt_cap = tk.fast_info.market_cap or 0
+                rev_if_thousands = raw_rev / 1e3   # interpret as $M
+                rev_if_full      = raw_rev / 1e6   # interpret as $M
+                # Price/Sales sanity: if P/S < 0.1 or > 1000 something is wrong
+                ps_thousands = mkt_cap / (rev_if_thousands * 1e6) if rev_if_thousands > 0 else 999
+                ps_full      = mkt_cap / (rev_if_full      * 1e6) if rev_if_full      > 0 else 999
+                # Pick whichever gives a more sensible P/S ratio (between 0.1 and 200)
+                ok_t = 0.1 <= ps_thousands <= 200
+                ok_f = 0.1 <= ps_full      <= 200
+                if ok_t and not ok_f:
+                    scale = 1e3
+                elif ok_f and not ok_t:
+                    scale = 1e6
+                else:
+                    scale = 1e3  # default to thousands when ambiguous
+            except:
+                scale = 1e3  # default to thousands
+        elif raw_rev >= 1e3:
+            scale = 1.0  # already in millions
         else:
-            scale = 1e6   # very small company, treat as raw units
+            scale = 1e6  # fallback
 
         factor = fx_rate / scale
 
-        data = {} 
-        
         data['Revenue'] = get_val(inc, ['Total Revenue', 'Total Net Sales']) * factor
         data['EBIT']    = get_val(inc, ['Operating Income', 'EBIT']) * factor
         data['PreTaxIncome'] = get_val(inc, ['Pretax Income']) * factor
         data['TaxProvision'] = get_val(inc, ['Tax Provision']) * factor
-        
+
         data['Depreciation'] = get_val(cf, ['Depreciation And Amortization']) * factor
         if data['Depreciation'] == 0:
-             data['Depreciation'] = get_val(inc, ['Reconciled Depreciation']) * factor
-             
+            data['Depreciation'] = get_val(inc, ['Reconciled Depreciation']) * factor
+
         data['Capex'] = abs(get_val(cf, ['Capital Expenditure', 'Capital Expenditures'])) * factor
         data['SBC'] = get_val(cf, ['Stock Based Compensation']) * factor
         data['ChangeInWC'] = get_val(cf, ['Change In Working Capital', 'Changes In Cash', 'Change To Netincome']) * factor
-        
+
         data['Debt'] = get_val(bs, ['Total Debt', 'Long Term Debt']) * factor
         data['Cash'] = get_val(bs, ['Cash And Cash Equivalents']) * factor
         data['Interest'] = abs(get_val(inc, ['Interest Expense', 'Interest Expense Non Operating'])) * factor
