@@ -304,8 +304,25 @@ def get_yahoo_data(ticker):
                     return val
             return 0.0
 
-        data = {}
-        factor = fx_rate / 1e6 
+        # Determine the correct scale divisor.
+        # Yahoo returns financials in full units (e.g. actual dollars/yuan).
+        # We want millions for display. However, some tickers (notably foreign ADRs)
+        # already report in millions or thousands in Yahoo's API — detect via magnitude.
+        raw_rev = get_val(inc, ['Total Revenue', 'Total Net Sales'])
+        if raw_rev == 0:
+            scale = 1e6   # can't detect, use default
+        elif raw_rev > 1e10:
+            scale = 1e6   # raw units (billions range) → divide by 1M to get $M
+        elif raw_rev > 1e7:
+            scale = 1e3   # already in thousands → divide by 1K to get $M
+        elif raw_rev > 1e4:
+            scale = 1.0   # already in millions → no division needed
+        else:
+            scale = 1e6   # very small company, treat as raw units
+
+        factor = fx_rate / scale
+
+        data = {} 
         
         data['Revenue'] = get_val(inc, ['Total Revenue', 'Total Net Sales']) * factor
         data['EBIT']    = get_val(inc, ['Operating Income', 'EBIT']) * factor
