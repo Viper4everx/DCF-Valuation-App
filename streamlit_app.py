@@ -645,6 +645,22 @@ if ticker and st.session_state.get('company_name'):
             ("DDM",           "caution",   "Only mature cos. with consistent dividends"),
             ("P/Book",        "avoid",     "Asset values vary widely"),
         ],
+        'E-Commerce & Retail': [
+            ("EV/Revenue",    "primary",   "Low margins make revenue scale the key metric"),
+            ("EV/EBITDA",     "primary",   "Standard retail & marketplace comparison"),
+            ("DCF",           "secondary", "Useful but sensitive to margin assumptions"),
+            ("P/E",           "caution",   "Margins often too thin or volatile for P/E"),
+            ("DDM",           "avoid",     "Retailers rarely pay meaningful dividends"),
+            ("P/Book",        "avoid",     "Asset base doesn't reflect brand/logistics value"),
+        ],
+        'Consumer Cyclical': [
+            ("EV/EBITDA",     "primary",   "Standard for discretionary consumer companies"),
+            ("DCF",           "primary",   "Works well for established consumer brands"),
+            ("P/E",           "secondary", "Clean for profitable consumer businesses"),
+            ("EV/Revenue",    "caution",   "Only useful if margins are depressed"),
+            ("DDM",           "caution",   "Only for mature cos. with consistent dividends"),
+            ("P/Book",        "avoid",     "Brand value not on balance sheet"),
+        ],
     }
 
     # Fuzzy match — use both sector AND industry for accuracy
@@ -654,11 +670,15 @@ if ticker and st.session_state.get('company_name'):
 
     matched_key = None
 
-    # ── Industry-level overrides (checked first — more specific than sector) ──
-    # Catches fintech/financial data companies that Yahoo puts under "Financial Services"
-    # but are really software/data businesses
+    # ── Industry-level overrides (checked first — most specific) ──
+    RETAIL_INDUSTRIES = [
+        'internet retail', 'e-commerce', 'ecommerce', 'online retail',
+        'specialty retail', 'department stores', 'discount stores',
+        'grocery', 'apparel retail', 'home improvement retail',
+        'auto & truck dealerships', 'retail',
+    ]
     SOFTWARE_INDUSTRIES = [
-        'software', 'saas', 'cloud', 'internet', 'information technology',
+        'software', 'saas', 'cloud', 'information technology',
         'financial data', 'stock exchange', 'data & analytics', 'financial technology',
         'fintech', 'electronic trading', 'financial software', 'business software',
         'application software', 'infrastructure software', 'it services',
@@ -672,7 +692,10 @@ if ticker and st.session_state.get('company_name'):
         'mortgage', 'consumer lending', 'corporate lending',
     ]
 
-    if any(x in _ind_lower for x in SOFTWARE_INDUSTRIES):
+    # Retail/e-commerce checked BEFORE software to prevent 'internet retail' → software
+    if any(x in _ind_lower for x in RETAIL_INDUSTRIES):
+        matched_key = 'E-Commerce & Retail'
+    elif any(x in _ind_lower for x in SOFTWARE_INDUSTRIES):
         matched_key = 'Software—Application'
     elif any(x in _ind_lower for x in SEMI_INDUSTRIES):
         matched_key = 'Semiconductors'
@@ -696,13 +719,13 @@ if ticker and st.session_state.get('company_name'):
             matched_key = 'Oil & Gas E&P'
         elif any(x in _sec_lower for x in ['pharma', 'drug', 'biotech', 'health']):
             matched_key = 'Drug Manufacturers'
-        elif any(x in _sec_lower for x in ['software', 'saas', 'cloud', 'internet']):
+        elif any(x in _sec_lower for x in ['retail', 'e-commerce', 'cyclical']):
+            matched_key = 'E-Commerce & Retail'
+        elif any(x in _sec_lower for x in ['software', 'saas', 'cloud']):
             matched_key = 'Software—Application'
         elif any(x in _sec_lower for x in ['tech', 'semi', 'chip', 'hardware', 'electronic']):
             matched_key = 'Semiconductors'
         elif any(x in _sec_lower for x in ['financial', 'bank', 'credit', 'insurance', 'asset management']):
-            # Only classify as bank if it's genuinely a financial institution,
-            # not a fintech/data company — industry check already handled those above
             matched_key = 'Banks—Diversified'
         elif any(x in _sec_lower for x in ['consumer', 'food', 'beverage', 'household', 'staple']):
             matched_key = 'Consumer Defensive'
