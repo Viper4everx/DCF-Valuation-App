@@ -714,37 +714,42 @@ if ticker and st.session_state.get('company_name'):
     methods = COMPASS[matched_key]
 
     STATUS_STYLE = {
-        "primary":   ("✅", "#4ade80", "rgba(74,222,128,0.08)",  "PRIMARY"),
-        "secondary": ("🔵", "#60a5fa", "rgba(96,165,250,0.08)",  "SECONDARY"),
-        "caution":   ("⚠️", "#fb923c", "rgba(251,146,60,0.08)",  "CAUTION"),
-        "avoid":     ("❌", "#f87171", "rgba(248,113,113,0.06)", "AVOID"),
+        "primary":   ("✅", "#4ade80", "rgba(74,222,128,0.08)", "2px solid rgba(74,222,128,0.3)",  "PRIMARY"),
+        "secondary": ("🔵", "#60a5fa", "rgba(96,165,250,0.08)", "2px solid rgba(96,165,250,0.3)",  "SECONDARY"),
+        "caution":   ("⚠️", "#fb923c", "rgba(251,146,60,0.08)", "2px solid rgba(251,146,60,0.3)",  "CAUTION"),
+        "avoid":     ("❌", "#f87171", "rgba(248,113,113,0.06)","2px solid rgba(248,113,113,0.25)","AVOID"),
     }
 
-    # Which methods are in use in this app
     IN_MODEL = {"DCF", "EV/EBITDA"}
 
     st.markdown(f"###### 🧭 Valuation Compass — *{matched_key}*")
 
     cols = st.columns(3)
     for i, (method, status, note) in enumerate(methods):
-        icon, color, bg, label = STATUS_STYLE[status]
-        badge = " `IN MODEL`" if method in IN_MODEL else ""
+        icon, color, bg, border, label = STATUS_STYLE[status]
+        in_model_tag = (
+            f"<span style='background:rgba(96,165,250,0.2);color:#60a5fa;"
+            f"font-size:9px;border-radius:3px;padding:1px 5px;"
+            f"margin-left:5px;font-weight:700;'>IN MODEL</span>"
+            if method in IN_MODEL else ""
+        )
         with cols[i % 3]:
             st.markdown(
-                f"<div style='background:{bg}; border:1px solid {color}44; border-radius:8px; "
-                f"padding:10px 12px; margin-bottom:8px;'>"
-                f"<div style='font-size:12px; font-weight:700; color:{color};'>"
+                f"<div style='background:{bg};border:{border};border-radius:8px;"
+                f"padding:12px 14px;margin-bottom:8px;min-height:72px;'>"
+                f"<div style='font-size:12px;font-weight:700;color:{color};margin-bottom:4px;'>"
                 f"{icon} {method}"
-                f"<span style='font-size:9px; margin-left:6px; opacity:0.7;'>{label}</span>"
+                f"<span style='font-size:9px;opacity:0.65;margin-left:5px;"
+                f"background:rgba(255,255,255,0.06);border-radius:3px;padding:1px 4px;'>"
+                f"{label}</span>"
+                f"{in_model_tag}"
                 f"</div>"
-                f"<div style='font-size:11px; opacity:0.6; margin-top:3px;'>{note}</div>"
+                f"<div style='font-size:11px;opacity:0.6;line-height:1.4;'>{note}</div>"
                 f"</div>",
                 unsafe_allow_html=True
             )
-            if method in IN_MODEL:
-                st.caption("✦ used in this model")
 
-    st.caption(f"Sector matched to: *{_sector}*  |  ✅ Primary  🔵 Secondary  ⚠️ Caution  ❌ Avoid")
+    st.caption(f"Sector: *{_sector}*  ·  ✅ Primary  🔵 Secondary  ⚠️ Caution  ❌ Avoid  ·  IN MODEL = used in DCF tab")
 
 date_display = st.session_state.get('file_date', 'Unknown')
 
