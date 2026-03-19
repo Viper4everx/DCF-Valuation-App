@@ -647,31 +647,66 @@ if ticker and st.session_state.get('company_name'):
         ],
     }
 
-    # Fuzzy match sector to compass key
+    # Fuzzy match — use both sector AND industry for accuracy
+    # Yahoo's industry field is more specific than sector
+    _ind_lower = _industry.lower()
+    _sec_lower = _sector.lower()
+
     matched_key = None
-    for key in COMPASS:
-        if key.lower() in _sector.lower() or _sector.lower() in key.lower():
-            matched_key = key
-            break
-    # Broader fallbacks
+
+    # ── Industry-level overrides (checked first — more specific than sector) ──
+    # Catches fintech/financial data companies that Yahoo puts under "Financial Services"
+    # but are really software/data businesses
+    SOFTWARE_INDUSTRIES = [
+        'software', 'saas', 'cloud', 'internet', 'information technology',
+        'financial data', 'stock exchange', 'data & analytics', 'financial technology',
+        'fintech', 'electronic trading', 'financial software', 'business software',
+        'application software', 'infrastructure software', 'it services',
+    ]
+    SEMI_INDUSTRIES = [
+        'semiconductor', 'chip', 'integrated circuit', 'electronic component',
+        'electronic equipment', 'hardware', 'computer hardware',
+    ]
+    BANK_INDUSTRIES = [
+        'bank', 'commercial bank', 'savings institution', 'credit union',
+        'mortgage', 'consumer lending', 'corporate lending',
+    ]
+
+    if any(x in _ind_lower for x in SOFTWARE_INDUSTRIES):
+        matched_key = 'Software—Application'
+    elif any(x in _ind_lower for x in SEMI_INDUSTRIES):
+        matched_key = 'Semiconductors'
+    elif any(x in _ind_lower for x in BANK_INDUSTRIES):
+        matched_key = 'Banks—Diversified'
+
+    # ── Sector-level match (if industry didn't resolve it) ──
     if not matched_key:
-        if any(x in _sector.lower() for x in ['bank','financial','credit','asset management']):
-            matched_key = 'Banks—Diversified'
-        elif any(x in _sector.lower() for x in ['utility','utilities','electric','gas distribution']):
+        for key in COMPASS:
+            if key.lower() in _sec_lower or _sec_lower in key.lower():
+                matched_key = key
+                break
+
+    # ── Broad sector fallbacks ──
+    if not matched_key:
+        if any(x in _sec_lower for x in ['utility', 'utilities', 'electric', 'gas distribution']):
             matched_key = 'Utilities—Regulated Electric'
-        elif any(x in _sector.lower() for x in ['real estate','reit']):
+        elif any(x in _sec_lower for x in ['real estate', 'reit']):
             matched_key = 'Real Estate'
-        elif any(x in _sector.lower() for x in ['oil','gas','energy','petroleum','e&p']):
+        elif any(x in _sec_lower for x in ['oil', 'gas', 'energy', 'petroleum', 'e&p']):
             matched_key = 'Oil & Gas E&P'
-        elif any(x in _sector.lower() for x in ['pharma','drug','biotech','health']):
+        elif any(x in _sec_lower for x in ['pharma', 'drug', 'biotech', 'health']):
             matched_key = 'Drug Manufacturers'
-        elif any(x in _sector.lower() for x in ['software','saas','cloud','internet']):
+        elif any(x in _sec_lower for x in ['software', 'saas', 'cloud', 'internet']):
             matched_key = 'Software—Application'
-        elif any(x in _sector.lower() for x in ['tech','semi','chip','hardware','electronic']):
+        elif any(x in _sec_lower for x in ['tech', 'semi', 'chip', 'hardware', 'electronic']):
             matched_key = 'Semiconductors'
-        elif any(x in _sector.lower() for x in ['consumer','food','beverage','household','staple']):
+        elif any(x in _sec_lower for x in ['financial', 'bank', 'credit', 'insurance', 'asset management']):
+            # Only classify as bank if it's genuinely a financial institution,
+            # not a fintech/data company — industry check already handled those above
+            matched_key = 'Banks—Diversified'
+        elif any(x in _sec_lower for x in ['consumer', 'food', 'beverage', 'household', 'staple']):
             matched_key = 'Consumer Defensive'
-        elif any(x in _sector.lower() for x in ['industrial','aerospace','defence','machinery','transport']):
+        elif any(x in _sec_lower for x in ['industrial', 'aerospace', 'defence', 'machinery', 'transport']):
             matched_key = 'Industrials'
         else:
             matched_key = 'Technology'  # generic fallback
