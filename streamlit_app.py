@@ -482,10 +482,17 @@ def get_yahoo_data(ticker):
 # resolves currency symbol, renders company name banner,
 # and runs the Valuation Compass (sector-aware method guidance).
 # ==========================================
-c_tick, c_space, c_pdf = st.columns([1, 4, 1], vertical_alignment="bottom")
+c_tick, c_refresh, c_space, c_pdf = st.columns([1, 0.4, 3.6, 1], vertical_alignment="bottom")
 
 with c_tick:
     ticker = st.text_input("Ticker", "").upper()
+
+with c_refresh:
+    if st.button("🔄", help="Force refresh — clears cached data and re-fetches from Yahoo"):
+        get_yahoo_data.clear()
+        if 'last_ticker' in st.session_state:
+            del st.session_state['last_ticker']
+        st.rerun()
 
 pdf_spot = c_pdf.empty()
 
