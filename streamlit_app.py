@@ -1157,6 +1157,7 @@ try:
 
     # ── Method 2: Peer-relative EV/Revenue (30%) ──
     # Use sector median EV/Revenue from comparables; fall back to subject ticker's own multiple
+    comp_rows_val  = st.session_state.get('comp_data', [])
     peer_ev_revenues = [r['EV/Revenue'] for r in comp_rows_val if r.get('EV/Revenue')]
     if peer_ev_revenues:
         peer_rev_mult_med = float(np.median(peer_ev_revenues))
@@ -1175,7 +1176,6 @@ try:
 
     # ── Method 3: Peer-relative EV/EBITDA (30%) ──
     # Use sector median from comparables; fall back to user exit_mult only if no peers
-    comp_rows_val  = st.session_state.get('comp_data', [])
     peer_multiples = [r['EV/EBITDA'] for r in comp_rows_val if r.get('EV/EBITDA')]
     if peer_multiples:
         peer_mult_med = float(np.median(peer_multiples))
@@ -1217,6 +1217,7 @@ except Exception as e:
     sum_pv_final  = 0
     tv_r = 0
     pv_tv_g = pv_tv_r = pv_tv_e = 0
+    st.warning(f"Valuation error: {e}")
 
 
 # ==========================================
