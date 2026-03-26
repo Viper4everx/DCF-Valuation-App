@@ -970,7 +970,22 @@ with st.sidebar:
     elif current_margin < 0.10: def_growth = 3.0
     else: def_growth = 5.0
 
-    g_rev = st.number_input("Revenue Growth %", value=def_growth * mult_g, step=0.5, format="%.1f", key=f"g_{ticker}_{scenario}_{st.session_state.reset_key}") / 100
+    st.markdown("**Revenue Growth (Two-Phase)**")
+    g1 = st.number_input("Phase 1 Growth % (Yrs 1–5)", value=def_growth * mult_g, step=0.5, format="%.1f",
+                          help="Held flat for Years 1–5. Your explicit near-term forecast.",
+                          key=f"g1_{ticker}_{scenario}_{st.session_state.reset_key}") / 100
+    g2 = st.number_input("Phase 2 Growth % (Yrs 6–10)", value=max(def_growth * mult_g * 0.6, 2.0), step=0.5, format="%.1f",
+                          help="Decays linearly from this rate to Terminal Growth by Year 10. Models the transition to maturity.",
+                          key=f"g2_{ticker}_{scenario}_{st.session_state.reset_key}") / 100
+    # g_rev kept as alias for Phase 1 for backward-compat references
+    g_rev = g1
+
+    # WACC stress premium: negative Phase 1 growth = distress, raise discount rate
+    if g1 < -0.05:
+        stress_premium = min(abs(g1) * 0.3, 0.03)  # up to +3%, scaled to severity
+        wacc = wacc + stress_premium
+        st.caption(f"⚠️ Distress premium: WACC +{stress_premium:.1%} (negative growth scenario)")
+
     m_def = (current_margin * 100)
     margin_tgt = st.number_input("EBIT Margin %", value=float(f"{m_def * mult_m:.1f}"), step=0.5, format="%.1f", key=f"m_{ticker}_{scenario}_{st.session_state.reset_key}") / 100
     tax_rate = st.number_input("Tax Rate %", value=float(f"{eff_tax_rate*100:.1f}"), step=1.0, format="%.1f", key=f"t_{ticker}_{scenario}_{st.session_state.reset_key}") / 100
@@ -1030,12 +1045,11 @@ with st.sidebar:
 # ==========================================
 # SECTION 7 — CALCULATION ENGINE (10-YEAR TWO-PHASE DCF)
 # Builds df_base: Year 0 actuals + Years 1–10 projections.
-# Growth decays linearly from g_rev (Year 1) to safe_ltg (Year 10).
+# Phase 1 (Y1–5): g1 held flat — user's explicit near-term forecast.
+# Phase 2 (Y6–10): linear decay from g2 to safe_ltg — transition to maturity.
 # Uses margin_tgt, dep_r, cap_r, nwc_r, sbc_r_fcf ratios from Section 6.
 # Output: df_base (DataFrame) used by the editable table in Section 8.
 # ==========================================
-# Phase 1 (Y1–5): explicit forecast at user growth, decaying toward mid-growth
-# Phase 2 (Y6–10): growth continues decaying from mid-growth to terminal rate
 years = range(1, 11)
 base_data = []
 
@@ -1048,11 +1062,14 @@ if r_in > 0:
                        'D&A': d_in, 'Capex': c_in, 'Change in NWC': nwc_in, 'FCFF': fcff0, 'PV': 0.0})
 
     prev_rev = r_in
-    # Decay: Y1 starts at g_rev, reaches safe_ltg by Y10
     for y in years:
-        # Linear decay from g_rev (Y1) to safe_ltg (Y10)
-        current_g = g_rev + (safe_ltg - g_rev) * ((y - 1) / 9)
-        current_g = max(current_g, safe_ltg)
+        if y <= 5:
+            # Phase 1: hold g1 flat
+            current_g = g1
+        else:
+            # Phase 2: linear decay from g2 (Y6) to safe_ltg (Y10)
+            current_g = g2 + (safe_ltg - g2) * ((y - 6) / 4)
+            current_g = max(current_g, safe_ltg)
 
         rev   = prev_rev * (1 + current_g)
         ebit  = rev * margin_tgt
@@ -1104,7 +1121,7 @@ with tab_model:
         df_formatted,
         use_container_width=True,
         disabled=disabled_cols,
-        key=f"editor_{st.session_state.reset_key}_{g_rev:.4f}_{margin_tgt:.4f}_{wacc:.4f}_{tax_rate:.4f}_{ltg:.4f}_{term_cap_ratio:.2f}_{nwc_r:.4f}_{sbc_r_fcf:.4f}"
+        key=f"editor_{st.session_state.reset_key}_{g1:.4f}_{g2:.4f}_{margin_tgt:.4f}_{wacc:.4f}_{tax_rate:.4f}_{ltg:.4f}_{term_cap_ratio:.2f}_{nwc_r:.4f}_{sbc_r_fcf:.4f}"
     )
 
 # ==========================================
@@ -1147,12 +1164,24 @@ try:
 
     sum_pv_final = sum(fcf_stream)
 
+    # ── Dynamic terminal value weight based on Phase 1 growth ──
+    # Severe negative growth = company less likely to reach stable perpetuity
+    # Discount terminal weight and shift more weight to explicit period
+    if g1 >= 0:
+        tv_weight = 1.0          # normal: terminal value at full weight
+    elif g1 >= -0.10:
+        tv_weight = 0.80         # mild distress: terminal at 80%
+    elif g1 >= -0.20:
+        tv_weight = 0.60         # moderate distress: terminal at 60%
+    else:
+        tv_weight = 0.40         # severe distress: terminal at 40%
+
     # ── Normalized terminal FCF (Capex → maintenance level at Y10) ──
     term_capex_norm    = da10_final * term_cap_ratio
     fcf10_normalized   = (ebitda10_final - da10_final) * (1 - tax_rate) + da10_final - term_capex_norm
 
     # ── Method 1: Gordon Growth (40%) ──
-    tv_g     = fcf10_normalized * (1 + safe_ltg) / (wacc - safe_ltg)
+    tv_g     = fcf10_normalized * (1 + safe_ltg) / (wacc - safe_ltg) * tv_weight
     pv_tv_g  = tv_g * ((1 + wacc)**-10)
 
     # ── Method 2: Peer-relative EV/Revenue (30%) ──
@@ -1171,7 +1200,7 @@ try:
 
     # Year 10 projected revenue comes from edited_df
     rev10_final = clean_currency(edited_df.loc['Revenue', 'Year 10'], curr_symbol)
-    tv_r        = rev10_final * terminal_rev_mult
+    tv_r        = rev10_final * terminal_rev_mult * tv_weight
     pv_tv_r     = tv_r * ((1 + wacc)**-10)
 
     # ── Method 3: Peer-relative EV/EBITDA (30%) ──
@@ -1187,7 +1216,7 @@ try:
         terminal_mult = exit_mult   # fall back to user input
         mult_source   = f"User input {exit_mult:.1f}x (no peers loaded)"
 
-    tv_e    = ebitda10_final * terminal_mult
+    tv_e    = ebitda10_final * terminal_mult * tv_weight
     pv_tv_e = tv_e * ((1 + wacc)**-10)
 
     # ── Bridge to equity value ──
@@ -1216,6 +1245,7 @@ except Exception as e:
     mult_source   = "N/A"
     sum_pv_final  = 0
     tv_r = 0
+    tv_weight = 1.0
     pv_tv_g = pv_tv_r = pv_tv_e = 0
     st.warning(f"Valuation error: {e}")
 
@@ -1295,7 +1325,7 @@ with tab_model:
             st.markdown(f"""<div class="val-card border-purple">
               <div class="val-label">METHOD 1 · 40% WEIGHT</div>
               <div class="val-title">Gordon Growth DCF</div>
-              <div class="val-sub">10yr explicit · {safe_ltg:.1%} terminal growth</div>
+              <div class="val-sub">P1: {g1:.1%} (Y1–5) · P2: {g2:.1%} (Y6–10) · {safe_ltg:.1%} terminal</div>
               <div class="val-label">IMPLIED SHARE PRICE</div>
               <div class="val-price text-purple">{curr_symbol}{p_g:,.2f}</div>
               <div class="val-ev"><span>EV: </span><strong>{curr_symbol}{ev_g:,.2f}M</strong></div>
@@ -1401,46 +1431,48 @@ with tab_returns:
         with ror_col2:
             st.markdown("**Revenue Growth Required to Justify Current Price**")
             try:
-                def price_at_growth(g_try):
+                def price_at_growth(g1_try):
+                    # Phase 2 scales proportionally to Phase 1 when solving
+                    g2_try = g2 * (g1_try / g1) if g1 != 0 else g2
                     safe_ltg_try = min(ltg, wacc - 0.015)
-                    decay = 0.0
-                    if g_try > safe_ltg_try:
-                        decay = (g_try - (g_try + safe_ltg_try)/2) / 4
-                    pv_s = 0.0; prev_r = r_in; ebitda5 = 0.0; da5 = 0.0
-                    for y in range(1, 6):
-                        cg = max(g_try - decay*(y-1), safe_ltg_try)
-                        rv = prev_r * (1+cg)
-                        eb = rv * margin_tgt; no = eb * (1-tax_rate)
+                    pv_s = 0.0; prev_r = r_in; ebitda10s = 0.0; da10s = 0.0
+                    for y in range(1, 11):
+                        if y <= 5:
+                            cg = g1_try
+                        else:
+                            cg = g2_try + (safe_ltg_try - g2_try) * ((y - 6) / 4)
+                            cg = max(cg, safe_ltg_try)
+                        rv = prev_r * (1 + cg)
+                        eb = rv * margin_tgt; no = eb * (1 - tax_rate)
                         da = rv * dep_r; cx = rv * cap_r
                         dn = (rv - prev_r) * nwc_r; sb = rv * sbc_r_fcf
-                        pv_s += (no + da - cx - dn + sb) * ((1+wacc)**(-(y-0.5)))
+                        pv_s += (no + da - cx - dn + sb) * ((1 + wacc)**(-(y - 0.5)))
                         prev_r = rv
-                        if y == 5: ebitda5 = eb+da; da5 = da
-                    tc = da5 * term_cap_ratio
-                    fn = (ebitda5-da5)*(1-tax_rate)+da5-tc
-                    tv_g2 = fn*(1+safe_ltg_try)/(wacc-safe_ltg_try) * ((1+wacc)**-5)
-                    tv_e2 = ebitda5*exit_mult * ((1+wacc)**-5)
-                    wacc_c = wacc+0.01; sltg_c = min(safe_ltg_try, wacc_c-0.015)
-                    tv_c2 = fn*(1+sltg_c)/(wacc_c-sltg_c) * ((1+wacc)**-5)
-                    def ep(tv): return ((pv_s+tv-(debt_in-cash_in))/shares_in) if shares_in>0 else 0
-                    return (ep(tv_g2)+ep(tv_e2)+ep(tv_c2))/3
+                        if y == 10: ebitda10s = eb + da; da10s = da
+                    tc = da10s * term_cap_ratio
+                    fn = (ebitda10s - da10s) * (1 - tax_rate) + da10s - tc
+                    tv_wt = 1.0 if g1_try >= 0 else (0.80 if g1_try >= -0.10 else (0.60 if g1_try >= -0.20 else 0.40))
+                    tv_g2 = fn * (1 + safe_ltg_try) / (wacc - safe_ltg_try) * tv_wt * ((1 + wacc)**-10)
+                    tv_e2 = ebitda10s * terminal_mult * tv_wt * ((1 + wacc)**-10)
+                    def ep(tv): return ((pv_s + tv - (debt_in - cash_in)) / shares_in) if shares_in > 0 else 0
+                    return (ep(tv_g2) + ep(tv_e2)) / 2
 
-                lo, hi = -0.20, 1.00; req_g = None
-                for _ in range(60):
-                    mid = (lo+hi)/2
+                lo, hi = -0.50, 1.00; req_g = None
+                for _ in range(80):
+                    mid = (lo + hi) / 2
                     if price_at_growth(mid) < cur_price: lo = mid
                     else: hi = mid
-                    if abs(hi-lo) < 0.0001: req_g = mid; break
+                    if abs(hi - lo) < 0.0001: req_g = mid; break
 
                 if req_g is not None:
-                    delta   = req_g - g_rev
-                    color_g = "#4ade80" if req_g <= g_rev else "#fb923c"
-                    verdict = "✅ Current assumptions exceed what's needed" if req_g <= g_rev else "⚠️ Market is pricing in higher growth than modelled"
+                    delta   = req_g - g1
+                    color_g = "#4ade80" if req_g <= g1 else "#fb923c"
+                    verdict = "✅ Current assumptions exceed what's needed" if req_g <= g1 else "⚠️ Market is pricing in higher growth than modelled"
                     st.markdown(f"""
                     <div class="glass-card" style="text-align:center; padding:18px;">
-                      <div class="val-label">Required Revenue CAGR (Y1–5)</div>
+                      <div class="val-label">Required Phase 1 Growth (Yrs 1–5) to Justify Current Price</div>
                       <div style="font-size:36px; font-weight:700; color:{color_g}; margin:6px 0;">{req_g:.1%}</div>
-                      <div style="font-size:12px; opacity:0.7;">Your assumption: {g_rev:.1%} &nbsp;|&nbsp; Delta: {delta:+.1%}</div>
+                      <div style="font-size:12px; opacity:0.7;">Your assumption: {g1:.1%} &nbsp;|&nbsp; Delta: {delta:+.1%}</div>
                       <div style="font-size:11px; margin-top:8px; opacity:0.55;">{verdict}</div>
                     </div>
                     """, unsafe_allow_html=True)
@@ -1455,12 +1487,12 @@ with tab_returns:
     st.subheader("Sensitivity Analysis 🎯")
     st.caption("Implied Share Price based on WACC vs. Terminal Growth")
 
-    def quick_dcf_calc(w, t_g, r_in=r_in, g_rev=g_rev, margin_tgt=margin_tgt,
+    def quick_dcf_calc(w, t_g, r_in=r_in, g1=g1, g2=g2, margin_tgt=margin_tgt,
                         tax_rate=tax_rate, dep_r=dep_r, cap_r=cap_r, nwc_r=nwc_r,
                         sbc_r_fcf=sbc_r_fcf, term_cap_ratio=term_cap_ratio,
                         terminal_mult=terminal_mult,
                         debt_in=debt_in, cash_in=cash_in, shares_in=shares_in):
-        """Mirrors main model: 10yr linear decay, normalized terminal FCF,
+        """Mirrors main model: two-phase growth, normalized terminal FCF,
            blended Gordon (50%) + Peer EV/EBITDA (50%) terminal."""
         safe_t_g = min(t_g, w - 0.015)
         fcf_pv_sum = 0.0
@@ -1469,8 +1501,11 @@ with tab_returns:
         da10       = 0.0
 
         for y in range(1, 11):
-            current_g = g_rev + (safe_t_g - g_rev) * ((y - 1) / 9)
-            current_g = max(current_g, safe_t_g)
+            if y <= 5:
+                current_g = g1
+            else:
+                current_g = g2 + (safe_t_g - g2) * ((y - 6) / 4)
+                current_g = max(current_g, safe_t_g)
             rev   = prev_rev * (1 + current_g)
             ebit  = rev * margin_tgt
             nopat = ebit * (1 - tax_rate)
@@ -1488,9 +1523,10 @@ with tab_returns:
         term_capex  = da10 * term_cap_ratio
         fcf10_norm  = (ebitda10 - da10) * (1 - tax_rate) + da10 - term_capex
 
-        tv_gordon   = fcf10_norm * (1 + safe_t_g) / (w - safe_t_g)
+        tv_weight_s = 1.0 if g1 >= 0 else (0.80 if g1 >= -0.10 else (0.60 if g1 >= -0.20 else 0.40))
+        tv_gordon   = fcf10_norm * (1 + safe_t_g) / (w - safe_t_g) * tv_weight_s
         pv_gordon   = tv_gordon  * ((1 + w)**-10)
-        tv_peer     = ebitda10   * terminal_mult
+        tv_peer     = ebitda10   * terminal_mult * tv_weight_s
         pv_peer     = tv_peer    * ((1 + w)**-10)
 
         # 50/50 blend of Gordon and peer for sensitivity (conservative mix)
