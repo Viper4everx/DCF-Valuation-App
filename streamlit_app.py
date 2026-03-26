@@ -59,11 +59,11 @@ from reportlab.lib.pagesizes import letter
 #  SECTION 9  Valuation Logic         Three independent methods, weighted avg:
 #                                       Method 1 (40%) — Gordon Growth DCF
 #                                         10yr explicit + Gordon terminal
-#                                       Method 2 (30%) — Conservative DCF
-#                                         WACC+1.5%, LTG floored at 2%
+#                                       Method 2 (30%) — Peer EV/Revenue
+#                                         Sector median × 0.9 applied to Y10 rev
 #                                       Method 3 (30%) — Peer EV/EBITDA
 #                                         Sector median × 0.9 maturity disc.
-#                                     Outputs: p_g, p_c, p_e, avg_int, mos_pct
+#                                     Outputs: p_g, p_r, p_e, avg_int, mos_pct
 #
 #  ── FRONTEND (UI rendering, inside tab blocks) ─────────────────────────────
 #
@@ -79,9 +79,7 @@ from reportlab.lib.pagesizes import letter
 #
 #  TAB 3  Returns & Sensitivity       Rate-of-return table (entry price ×
 #                                     horizon), required growth solver,
-#                                     WACC/LTG sensitivity heatmap,
-#                                     Monte Carlo simulation (correlated
-#                                     multivariate normal draws).
+#                                     WACC/LTG sensitivity heatmap.
 #
 #  TAB 4  Historical                  4-year revenue/margin/FCF table with
 #                                     trend charts and CAGR vs model callout.
@@ -259,6 +257,9 @@ def get_yahoo_data(ticker):
         
         actual_ev_ebitda = info.get('enterpriseToEbitda')
         if actual_ev_ebitda is None or np.isnan(actual_ev_ebitda): actual_ev_ebitda = 0.0
+
+        actual_ev_revenue = info.get('enterpriseToRevenue')
+        if actual_ev_revenue is None or np.isnan(actual_ev_revenue): actual_ev_revenue = 0.0
         
         beta_raw = info.get('beta')
         
@@ -462,6 +463,7 @@ def get_yahoo_data(ticker):
                     pi = yf.Ticker(pt).info
                     if pi is None: return None
                     ev_eb  = pi.get('enterpriseToEbitda')
+                    ev_rev = pi.get('enterpriseToRevenue')
                     pe     = pi.get('trailingPE')
                     name   = pi.get('shortName', pt)[:20]
                     mktcap = pi.get('marketCap', 0) or 0
@@ -470,6 +472,7 @@ def get_yahoo_data(ticker):
                             'Ticker': pt,
                             'Name': name,
                             'EV/EBITDA': round(float(ev_eb), 1),
+                            'EV/Revenue': round(float(ev_rev), 1) if ev_rev and not np.isnan(float(ev_rev)) and float(ev_rev) > 0 else None,
                             'P/E': round(float(pe), 1) if pe and not np.isnan(float(pe)) else None,
                             'Mkt Cap $B': round(mktcap / 1e9, 1) if mktcap else None,
                         }
@@ -491,10 +494,10 @@ def get_yahoo_data(ticker):
         except Exception:
             comp_data = []
 
-        return data, price, shares, fx_msg, price_curr, industry, actual_ev_ebitda, last_date_str, hist_data, comp_data, company_name
+        return data, price, shares, fx_msg, price_curr, industry, actual_ev_ebitda, actual_ev_revenue, last_date_str, hist_data, comp_data, company_name
         
     except Exception as e:
-        return None, 0.0, 1.0, f"Connection Error: {str(e)}", "USD", "Unknown", None, "Unknown", [], [], ""
+        return None, 0.0, 1.0, f"Connection Error: {str(e)}", "USD", "Unknown", None, None, "Unknown", [], [], ""
 
 # ==========================================
 # SECTION 5 — INPUT SETUP & SESSION STATE
@@ -535,7 +538,7 @@ last_filing_date = "Unknown"
 if ticker:
     with st.spinner(f"Analysing {ticker}..."):
         if 'last_ticker' not in st.session_state or st.session_state.last_ticker != ticker:
-            d, cur_price, shares_def, fx_msg, currency, ind_name, ev_ebitda, file_date, hist_data, comp_data, company_name = get_yahoo_data(ticker)
+            d, cur_price, shares_def, fx_msg, currency, ind_name, ev_ebitda, ev_revenue, file_date, hist_data, comp_data, company_name = get_yahoo_data(ticker)
             if d:
                 st.session_state.y0 = d
                 st.session_state.last_price = cur_price
@@ -545,6 +548,7 @@ if ticker:
                 st.session_state.currency = currency
                 st.session_state.industry = ind_name
                 st.session_state.ev_ebitda_actual = ev_ebitda
+                st.session_state.ev_revenue_actual = ev_revenue
                 st.session_state.file_date = file_date
                 st.session_state.hist_data = hist_data
                 st.session_state.comp_data = comp_data
@@ -1107,13 +1111,13 @@ with tab_model:
 # SECTION 9 — VALUATION LOGIC (THREE INDEPENDENT METHODS)
 # Reads from edited_df (respects any manual overrides from Section 8).
 # Method 1 (40%): Gordon Growth — 10yr FCF + normalized Gordon terminal.
-# Method 2 (30%): Conservative DCF — WACC+1.5%, LTG floored at 2% GDP.
+# Method 2 (30%): Peer EV/Revenue — sector median × 0.9 applied to Y10 revenue.
 # Method 3 (30%): Peer EV/EBITDA — sector median × 0.9 maturity discount.
 # Weighted intrinsic value → avg_int. Upside → mos_pct.
 # All three EVs and equity prices available for bridge tables in Section 10.
 #    Method 1 (40%): 10yr DCF + Gordon Growth terminal
-#    Method 2 (30%): 10yr DCF + Conservative (WACC+1.5%, LTG floored at 2%)
-#    Method 3 (30%): 10yr DCF + Peer-relative EV/EBITDA terminal (sector median)
+#    Method 2 (30%): Peer EV/Revenue applied to Y10 revenue, discounted back at WACC
+#    Method 3 (30%): Peer-relative EV/EBITDA terminal (sector median)
 # ==========================================
 try:
     fcf_stream = []
@@ -1151,12 +1155,23 @@ try:
     tv_g     = fcf10_normalized * (1 + safe_ltg) / (wacc - safe_ltg)
     pv_tv_g  = tv_g * ((1 + wacc)**-10)
 
-    # ── Method 2: Conservative DCF (30%) ──
-    # WACC+1.5%, LTG floored at 2% (approx long-run nominal GDP)
-    wacc_cons    = wacc + 0.015
-    safe_ltg_cons = min(max(safe_ltg, 0.02), wacc_cons - 0.015)
-    tv_c         = fcf10_normalized * (1 + safe_ltg_cons) / (wacc_cons - safe_ltg_cons)
-    pv_tv_c      = tv_c * ((1 + wacc)**-10)   # discount at base WACC for comparability
+    # ── Method 2: Peer-relative EV/Revenue (30%) ──
+    # Use sector median EV/Revenue from comparables; fall back to subject ticker's own multiple
+    peer_ev_revenues = [r['EV/Revenue'] for r in comp_rows_val if r.get('EV/Revenue')]
+    if peer_ev_revenues:
+        peer_rev_mult_med = float(np.median(peer_ev_revenues))
+        terminal_rev_mult = peer_rev_mult_med * 0.90   # same 10% maturity discount as EV/EBITDA
+        rev_mult_source   = f"Peer median {peer_rev_mult_med:.1f}x × 0.9 discount"
+    else:
+        # Fall back to subject ticker's own current EV/Revenue from Yahoo
+        subj_ev_rev = st.session_state.get('ev_revenue_actual', 0) or 0
+        terminal_rev_mult = subj_ev_rev if subj_ev_rev > 0 else 3.0
+        rev_mult_source   = f"Subject EV/Rev {terminal_rev_mult:.1f}x (no peers)" if subj_ev_rev > 0 else "Default 3.0x (no data)"
+
+    # Year 10 projected revenue comes from edited_df
+    rev10_final = clean_currency(edited_df.loc['Revenue', 'Year 10'], curr_symbol)
+    tv_r        = rev10_final * terminal_rev_mult
+    pv_tv_r     = tv_r * ((1 + wacc)**-10)
 
     # ── Method 3: Peer-relative EV/EBITDA (30%) ──
     # Use sector median from comparables; fall back to user exit_mult only if no peers
@@ -1184,21 +1199,23 @@ try:
         return (eq / shares_in) if shares_in > 0 else 0.0, ev
 
     p_g, ev_g = get_equity_price(pv_tv_g)
-    p_c, ev_c = get_equity_price(pv_tv_c)
+    p_r, ev_r = get_equity_price(pv_tv_r)
     p_e, ev_e = get_equity_price(pv_tv_e)
 
     # ── Weighted intrinsic value ──
     w1, w2, w3 = 0.40, 0.30, 0.30
-    avg_int = w1 * p_g + w2 * p_c + w3 * p_e
+    avg_int = w1 * p_g + w2 * p_r + w3 * p_e
     mos_pct = (avg_int - cur_price) / cur_price if cur_price > 0 else 0.0
 
 except Exception as e:
-    p_g, p_c, p_e, avg_int, mos_pct = 0, 0, 0, 0, 0
-    ev_g, ev_c, ev_e = 0, 0, 0
+    p_g, p_r, p_e, avg_int, mos_pct = 0, 0, 0, 0, 0
+    ev_g, ev_r, ev_e = 0, 0, 0
     terminal_mult = exit_mult
+    terminal_rev_mult = 3.0
+    rev_mult_source   = "N/A"
     mult_source   = "N/A"
     sum_pv_final  = 0
-    pv_tv_g = pv_tv_c = pv_tv_e = 0
+    pv_tv_g = pv_tv_r = pv_tv_e = 0
 
 
 # ==========================================
@@ -1210,7 +1227,7 @@ except Exception as e:
 with tab_model:
     st.divider()
     if cur_price > 0 and r_in > 0:
-        model_prices = [p_g, p_c, p_e]
+        model_prices = [p_g, p_r, p_e]
         min_val = min(model_prices)
         max_val = max(model_prices)
 
@@ -1289,16 +1306,16 @@ with tab_model:
         with c_c:
             st.markdown(f"""<div class="val-card border-orange">
               <div class="val-label">METHOD 2 · 30% WEIGHT</div>
-              <div class="val-title">Conservative DCF 🛡️</div>
-              <div class="val-sub">WACC+1.5% · LTG floored at 2% (nominal GDP)</div>
+              <div class="val-title">Peer EV/Revenue 📊</div>
+              <div class="val-sub">{rev_mult_source}</div>
               <div class="val-label">IMPLIED SHARE PRICE</div>
-              <div class="val-price text-orange">{curr_symbol}{p_c:,.2f}</div>
-              <div class="val-ev"><span>EV: </span><strong>{curr_symbol}{ev_c:,.2f}M</strong></div>
+              <div class="val-price text-orange">{curr_symbol}{p_r:,.2f}</div>
+              <div class="val-ev"><span>EV: </span><strong>{curr_symbol}{ev_r:,.2f}M</strong></div>
             </div>""", unsafe_allow_html=True)
             st.markdown("<br>", unsafe_allow_html=True)
-            st.markdown("##### Bridge (Conservative)")
-            st.dataframe(make_bridge(sum_pv_final, pv_tv_c, ev_c, debt_in, cash_in,
-                         ev_c-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
+            st.markdown("##### Bridge (EV/Revenue)")
+            st.dataframe(make_bridge(sum_pv_final, pv_tv_r, ev_r, debt_in, cash_in,
+                         ev_r-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
 
         with c_e:
             st.markdown(f"""<div class="val-card border-green">
@@ -1314,8 +1331,8 @@ with tab_model:
             st.dataframe(make_bridge(sum_pv_final, pv_tv_e, ev_e, debt_in, cash_in,
                          ev_e-(debt_in-cash_in)).style.format(bridge_format), use_container_width=True)
 
-        st.caption(f"Weighted intrinsic value: 40% Gordon + 30% Conservative + 30% Peer EV/EBITDA. "
-                   f"Peer multiple: {mult_source}.")
+        st.caption(f"Weighted intrinsic value: 40% Gordon Growth + 30% Peer EV/Revenue + 30% Peer EV/EBITDA. "
+                   f"EV/Rev: {rev_mult_source}. EV/EBITDA: {mult_source}.")
 
     else:
         st.info("👈 Enter a ticker and configure your assumptions to see valuation results.")
@@ -1327,9 +1344,6 @@ with tab_model:
 # Part B: Required growth solver — binary search for the revenue CAGR
 #          that makes intrinsic value = current price.
 # Part C: Sensitivity heatmap — 5×5 grid of WACC vs terminal growth.
-# Part D: Monte Carlo — correlated multivariate normal draws across
-#          growth, margin, WACC. Runs 1k–10k simulations. Shows histogram
-#          and P10/P50/P90 percentiles.
 with tab_returns:
 
     # ---- Rate of Return ----
@@ -1435,12 +1449,9 @@ with tab_returns:
 
     st.divider()
 
-    # ---- Sensitivity + Monte Carlo side by side ----
-    c_sens, c_mc = st.columns(2)
-
-    with c_sens:
-        st.subheader("Sensitivity Analysis 🎯")
-        st.caption("Implied Share Price based on WACC vs. Terminal Growth")
+    # ---- Sensitivity Heatmap ----
+    st.subheader("Sensitivity Analysis 🎯")
+    st.caption("Implied Share Price based on WACC vs. Terminal Growth")
 
         def quick_dcf_calc(w, t_g, r_in=r_in, g_rev=g_rev, margin_tgt=margin_tgt,
                             tax_rate=tax_rate, dep_r=dep_r, cap_r=cap_r, nwc_r=nwc_r,
@@ -1506,89 +1517,6 @@ with tab_returns:
 
         st.dataframe(df_sens.style.format(f"{curr_symbol}{{:,.2f}}").map(style_sens), use_container_width=True)
 
-    with c_mc:
-        st.subheader("Monte Carlo Simulation 🎲")
-        st.caption("Randomised scenarios to estimate probability distribution of intrinsic value.")
-
-        sim_count = st.slider("Number of Simulations", 1000, 10000, 2000, step=1000)
-
-        if st.button("Run Simulation", use_container_width=True):
-            with st.spinner("Simulating..."):
-                np.random.seed(42)
-                sim_results = []
-
-                means = [g_rev, margin_tgt, wacc]
-                sig_g = g_rev * 0.2; sig_m = margin_tgt * 0.15; sig_w = wacc * 0.1
-                rho_gm = -0.3; rho_gw = 0.1; rho_mw = 0.05
-                cov_matrix = [
-                    [sig_g**2,           rho_gm*sig_g*sig_m, rho_gw*sig_g*sig_w],
-                    [rho_gm*sig_g*sig_m, sig_m**2,           rho_mw*sig_m*sig_w],
-                    [rho_gw*sig_g*sig_w, rho_mw*sig_m*sig_w, sig_w**2          ],
-                ]
-                draws = np.random.multivariate_normal(means, cov_matrix, sim_count)
-                draws[:, 1] = np.clip(draws[:, 1], 0.01, 0.60)
-
-                for i in range(sim_count):
-                    g_sim = draws[i, 0]; m_sim = draws[i, 1]; w_sim = draws[i, 2]
-                    pv_sum = 0.0; prev_rev_sim = r_in
-                    safe_ltg_sim = min(ltg, w_sim - 0.015)
-
-                    ebitda10_sim = 0.0; da10_sim = 0.0
-
-                    for y in range(1, 11):
-                        current_g_sim = g_sim + (safe_ltg_sim - g_sim) * ((y - 1) / 9)
-                        current_g_sim = max(current_g_sim, safe_ltg_sim)
-                        rev_sim   = prev_rev_sim * (1 + current_g_sim)
-                        ebit_sim  = rev_sim * m_sim
-                        nopat_sim = ebit_sim * (1 - tax_rate)
-                        da_sim    = rev_sim * dep_r; capex_sim = rev_sim * cap_r
-                        dnwc_sim  = (rev_sim - prev_rev_sim) * nwc_r
-                        sbc_sim   = rev_sim * sbc_r_fcf
-                        fcff_sim  = nopat_sim + da_sim - capex_sim - dnwc_sim + sbc_sim
-                        pv_sum   += fcff_sim * ((1 + w_sim)**-(y - 0.5))
-                        prev_rev_sim = rev_sim
-                        if y == 10: ebitda10_sim = ebit_sim + da_sim; da10_sim = da_sim
-
-                    # Terminal values
-                    term_capex_sim = da10_sim * term_cap_ratio
-                    fcf10_norm_sim = (ebitda10_sim - da10_sim)*(1-tax_rate) + da10_sim - term_capex_sim
-
-                    # Gordon Growth terminal
-                    tv_g_sim   = fcf10_norm_sim * (1+safe_ltg_sim) / (w_sim-safe_ltg_sim)
-                    pv_tv_g_sim = tv_g_sim * ((1+w_sim)**-10)
-
-                    # Conservative terminal (WACC+1.5%)
-                    w_cons_sim    = w_sim + 0.015
-                    sltg_c_sim    = min(max(safe_ltg_sim, 0.02), w_cons_sim - 0.015)
-                    tv_c_sim      = fcf10_norm_sim * (1+sltg_c_sim) / (w_cons_sim-sltg_c_sim)
-                    pv_tv_c_sim   = tv_c_sim * ((1+w_sim)**-10)
-
-                    # Peer EV/EBITDA terminal
-                    tv_e_sim      = ebitda10_sim * terminal_mult
-                    pv_tv_e_sim   = tv_e_sim * ((1+w_sim)**-10)
-
-                    def _ep(tv): return ((pv_sum+tv-(debt_in-cash_in))/shares_in) if shares_in>0 else 0
-                    # Weighted same as main model
-                    avg_share_price = 0.40*_ep(pv_tv_g_sim) + 0.30*_ep(pv_tv_c_sim) + 0.30*_ep(pv_tv_e_sim)
-                    sim_results.append(avg_share_price)
-
-                sim_df = pd.DataFrame(sim_results, columns=["Price"])
-                sim_df = sim_df[(sim_df['Price'] > 0) & (sim_df['Price'] < cur_price * 4)]
-                counts, bins = np.histogram(sim_df['Price'], bins=30)
-                bin_mids = [f"{curr_symbol}{(bins[i]+bins[i+1])/2:.0f}" for i in range(len(bins)-1)]
-                st.bar_chart(pd.DataFrame({"Frequency": counts}, index=bin_mids), color="#60a5fa")
-
-                p10 = np.percentile(sim_results, 10)
-                p50 = np.percentile(sim_results, 50)
-                p90 = np.percentile(sim_results, 90)
-                st.markdown(f"""
-                <div style="display:flex; justify-content:space-between; font-size:12px; margin-top:10px;">
-                  <div class="status-over">P10 (Bear): {curr_symbol}{p10:,.2f}</div>
-                  <div class="text-blue">P50 (Base): {curr_symbol}{p50:,.2f}</div>
-                  <div class="status-under">P90 (Bull): {curr_symbol}{p90:,.2f}</div>
-                </div>
-                """, unsafe_allow_html=True)
-
 # TAB 4 — HISTORICAL FINANCIALS
 # Shows 4 years of actual revenue, EBIT margin, D&A, Capex, SBC, FCFF.
 # Revenue and margin trend charts. CAGR callout vs modelled growth assumption.
@@ -1631,59 +1559,91 @@ with tab_hist:
 
 # TAB 5 — PEER COMPARABLES
 # Sector peers fetched in parallel during get_yahoo_data().
-# Table shows EV/EBITDA, P/E, market cap for up to 5 peers.
-# Peer median EV/EBITDA badge vs your exit multiple with pass/warn indicator.
-# This median feeds directly into Method 3 of the valuation (Section 9).
+# Table shows EV/EBITDA, EV/Revenue, P/E, market cap for up to 5 peers.
+# Peer median badges for both multiples vs your exit assumptions.
+# These medians feed directly into Methods 2 and 3 of the valuation (Section 9).
 with tab_comp:
     comp_rows = st.session_state.get('comp_data', [])
     if comp_rows:
         ind = st.session_state.get('industry', 'Unknown')
         st.subheader(f"Peer Comparables — {ind}")
-        st.caption("Sector peers pulled from Yahoo Finance. Use EV/EBITDA median to anchor your exit multiple assumption.")
+        st.caption("Sector peers pulled from Yahoo Finance. EV/EBITDA and EV/Revenue medians feed directly into the valuation model.")
 
         df_comp = pd.DataFrame(comp_rows)
         if ticker and cur_price > 0 and r_in > 0:
-            ev_ebitda_self = st.session_state.get('ev_ebitda_actual', None)
+            ev_ebitda_self  = st.session_state.get('ev_ebitda_actual', None)
+            ev_revenue_self = st.session_state.get('ev_revenue_actual', None)
             self_row = {
                 'Ticker': f"▶ {ticker}", 'Name': f"{ticker} (You)",
-                'EV/EBITDA': round(ev_ebitda_self, 1) if ev_ebitda_self and ev_ebitda_self > 0 else None,
+                'EV/EBITDA':  round(ev_ebitda_self,  1) if ev_ebitda_self  and ev_ebitda_self  > 0 else None,
+                'EV/Revenue': round(ev_revenue_self, 1) if ev_revenue_self and ev_revenue_self > 0 else None,
                 'P/E': None, 'Mkt Cap $B': None,
             }
             df_comp = pd.concat([pd.DataFrame([self_row]), df_comp], ignore_index=True)
 
-        peer_ev_ebitda = [r['EV/EBITDA'] for r in comp_rows if r.get('EV/EBITDA')]
-        peer_median    = round(float(np.median(peer_ev_ebitda)), 1) if peer_ev_ebitda else None
+        peer_ev_ebitda  = [r['EV/EBITDA']  for r in comp_rows if r.get('EV/EBITDA')]
+        peer_ev_revenue = [r['EV/Revenue']  for r in comp_rows if r.get('EV/Revenue')]
+        peer_median_ebitda  = round(float(np.median(peer_ev_ebitda)),  1) if peer_ev_ebitda  else None
+        peer_median_revenue = round(float(np.median(peer_ev_revenue)), 1) if peer_ev_revenue else None
 
         def fmt_cell(v, suffix="x"): return f"{v}{suffix}" if v is not None else "N/A"
         df_dc = df_comp.copy()
         df_dc['EV/EBITDA']  = df_comp['EV/EBITDA'].apply(lambda v: fmt_cell(v, "x"))
+        df_dc['EV/Revenue'] = df_comp['EV/Revenue'].apply(lambda v: fmt_cell(v, "x")) if 'EV/Revenue' in df_comp.columns else "N/A"
         df_dc['P/E']        = df_comp['P/E'].apply(lambda v: fmt_cell(v, "x"))
         df_dc['Mkt Cap $B'] = df_comp['Mkt Cap $B'].apply(lambda v: fmt_cell(v, "B"))
         st.dataframe(df_dc.set_index('Ticker'), use_container_width=True)
 
-        if peer_median is not None:
-            diff    = exit_mult - peer_median
-            color_m = "#4ade80" if abs(diff) < 2 else "#fb923c"
-            st.markdown(f"""
-            <div class="glass-card" style="margin-top:10px;">
-              <div style="display:flex; justify-content:space-around; text-align:center;">
-                <div>
-                  <div class="val-label">Peer Median EV/EBITDA</div>
-                  <div style="font-size:28px; font-weight:700; color:#60a5fa;">{peer_median}x</div>
+        col_b1, col_b2 = st.columns(2)
+
+        if peer_median_ebitda is not None:
+            diff_ebitda = exit_mult - peer_median_ebitda
+            color_ebitda = "#4ade80" if abs(diff_ebitda) < 2 else "#fb923c"
+            with col_b1:
+                st.markdown(f"""
+                <div class="glass-card" style="margin-top:10px;">
+                  <div style="display:flex; justify-content:space-around; text-align:center;">
+                    <div>
+                      <div class="val-label">Peer Median EV/EBITDA</div>
+                      <div style="font-size:28px; font-weight:700; color:#60a5fa;">{peer_median_ebitda}x</div>
+                    </div>
+                    <div>
+                      <div class="val-label">Your Exit Multiple</div>
+                      <div style="font-size:28px; font-weight:700; color:#a78bfa;">{exit_mult:.1f}x</div>
+                    </div>
+                    <div>
+                      <div class="val-label">vs. Peers</div>
+                      <div style="font-size:28px; font-weight:700; color:{color_ebitda};">{diff_ebitda:+.1f}x</div>
+                    </div>
+                  </div>
+                  <div style="text-align:center; font-size:11px; opacity:0.5; margin-top:8px;">
+                    {'✅ Exit multiple is close to peer median' if abs(diff_ebitda) < 2 else '⚠️ Exit multiple deviates significantly from peers — double-check your assumption'}
+                  </div>
                 </div>
-                <div>
-                  <div class="val-label">Your Exit Multiple</div>
-                  <div style="font-size:28px; font-weight:700; color:#a78bfa;">{exit_mult:.1f}x</div>
+                """, unsafe_allow_html=True)
+
+        if peer_median_revenue is not None:
+            with col_b2:
+                st.markdown(f"""
+                <div class="glass-card" style="margin-top:10px;">
+                  <div style="display:flex; justify-content:space-around; text-align:center;">
+                    <div>
+                      <div class="val-label">Peer Median EV/Revenue</div>
+                      <div style="font-size:28px; font-weight:700; color:#60a5fa;">{peer_median_revenue}x</div>
+                    </div>
+                    <div>
+                      <div class="val-label">Model Uses (×0.9)</div>
+                      <div style="font-size:28px; font-weight:700; color:#a78bfa;">{peer_median_revenue * 0.9:.1f}x</div>
+                    </div>
+                    <div>
+                      <div class="val-label">Implied Y10 EV</div>
+                      <div style="font-size:28px; font-weight:700; color:#34d399;">{curr_symbol}{tv_r:,.0f}M</div>
+                    </div>
+                  </div>
+                  <div style="text-align:center; font-size:11px; opacity:0.5; margin-top:8px;">
+                    Applied to Year 10 projected revenue · discounted back at WACC
+                  </div>
                 </div>
-                <div>
-                  <div class="val-label">vs. Peers</div>
-                  <div style="font-size:28px; font-weight:700; color:{color_m};">{diff:+.1f}x</div>
-                </div>
-              </div>
-              <div style="text-align:center; font-size:11px; opacity:0.5; margin-top:8px;">
-                {'✅ Exit multiple is close to peer median' if abs(diff) < 2 else '⚠️ Exit multiple deviates significantly from peers — double-check your assumption'}
-              </div>
-            </div>
-            """, unsafe_allow_html=True)
+                """, unsafe_allow_html=True)
     else:
         st.info("Enter a ticker above to load peer comparables.")
