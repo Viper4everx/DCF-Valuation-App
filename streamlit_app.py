@@ -1100,7 +1100,7 @@ with tab_model:
         df_formatted,
         use_container_width=True,
         disabled=disabled_cols,
-        key=f"editor_{st.session_state.reset_key}"
+        key=f"editor_{st.session_state.reset_key}_{g_rev:.4f}_{margin_tgt:.4f}_{wacc:.4f}_{tax_rate:.4f}_{ltg:.4f}_{term_cap_ratio:.2f}_{nwc_r:.4f}_{sbc_r_fcf:.4f}"
     )
 
 # ==========================================
