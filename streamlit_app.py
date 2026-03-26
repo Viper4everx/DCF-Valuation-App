@@ -1453,69 +1453,69 @@ with tab_returns:
     st.subheader("Sensitivity Analysis 🎯")
     st.caption("Implied Share Price based on WACC vs. Terminal Growth")
 
-        def quick_dcf_calc(w, t_g, r_in=r_in, g_rev=g_rev, margin_tgt=margin_tgt,
-                            tax_rate=tax_rate, dep_r=dep_r, cap_r=cap_r, nwc_r=nwc_r,
-                            sbc_r_fcf=sbc_r_fcf, term_cap_ratio=term_cap_ratio,
-                            terminal_mult=terminal_mult,
-                            debt_in=debt_in, cash_in=cash_in, shares_in=shares_in):
-            """Mirrors main model: 10yr linear decay, normalized terminal FCF,
-               blended Gordon (50%) + Peer EV/EBITDA (50%) terminal."""
-            safe_t_g = min(t_g, w - 0.015)
-            fcf_pv_sum = 0.0
-            prev_rev   = r_in
-            ebitda10   = 0.0
-            da10       = 0.0
+    def quick_dcf_calc(w, t_g, r_in=r_in, g_rev=g_rev, margin_tgt=margin_tgt,
+                        tax_rate=tax_rate, dep_r=dep_r, cap_r=cap_r, nwc_r=nwc_r,
+                        sbc_r_fcf=sbc_r_fcf, term_cap_ratio=term_cap_ratio,
+                        terminal_mult=terminal_mult,
+                        debt_in=debt_in, cash_in=cash_in, shares_in=shares_in):
+        """Mirrors main model: 10yr linear decay, normalized terminal FCF,
+           blended Gordon (50%) + Peer EV/EBITDA (50%) terminal."""
+        safe_t_g = min(t_g, w - 0.015)
+        fcf_pv_sum = 0.0
+        prev_rev   = r_in
+        ebitda10   = 0.0
+        da10       = 0.0
 
-            for y in range(1, 11):
-                current_g = g_rev + (safe_t_g - g_rev) * ((y - 1) / 9)
-                current_g = max(current_g, safe_t_g)
-                rev   = prev_rev * (1 + current_g)
-                ebit  = rev * margin_tgt
-                nopat = ebit * (1 - tax_rate)
-                da    = rev * dep_r
-                capex = rev * cap_r
-                dnwc  = (rev - prev_rev) * nwc_r
-                sbc   = rev * sbc_r_fcf
-                fcff  = nopat + da - capex - dnwc + sbc
-                fcf_pv_sum += fcff * ((1 + w)**-(y - 0.5))
-                prev_rev = rev
-                if y == 10:
-                    ebitda10 = ebit + da
-                    da10     = da
+        for y in range(1, 11):
+            current_g = g_rev + (safe_t_g - g_rev) * ((y - 1) / 9)
+            current_g = max(current_g, safe_t_g)
+            rev   = prev_rev * (1 + current_g)
+            ebit  = rev * margin_tgt
+            nopat = ebit * (1 - tax_rate)
+            da    = rev * dep_r
+            capex = rev * cap_r
+            dnwc  = (rev - prev_rev) * nwc_r
+            sbc   = rev * sbc_r_fcf
+            fcff  = nopat + da - capex - dnwc + sbc
+            fcf_pv_sum += fcff * ((1 + w)**-(y - 0.5))
+            prev_rev = rev
+            if y == 10:
+                ebitda10 = ebit + da
+                da10     = da
 
-            term_capex  = da10 * term_cap_ratio
-            fcf10_norm  = (ebitda10 - da10) * (1 - tax_rate) + da10 - term_capex
+        term_capex  = da10 * term_cap_ratio
+        fcf10_norm  = (ebitda10 - da10) * (1 - tax_rate) + da10 - term_capex
 
-            tv_gordon   = fcf10_norm * (1 + safe_t_g) / (w - safe_t_g)
-            pv_gordon   = tv_gordon  * ((1 + w)**-10)
-            tv_peer     = ebitda10   * terminal_mult
-            pv_peer     = tv_peer    * ((1 + w)**-10)
+        tv_gordon   = fcf10_norm * (1 + safe_t_g) / (w - safe_t_g)
+        pv_gordon   = tv_gordon  * ((1 + w)**-10)
+        tv_peer     = ebitda10   * terminal_mult
+        pv_peer     = tv_peer    * ((1 + w)**-10)
 
-            # 50/50 blend of Gordon and peer for sensitivity (conservative mix)
-            pv_tv_blend = 0.50 * pv_gordon + 0.50 * pv_peer
-            ev  = fcf_pv_sum + pv_tv_blend
-            eq  = ev - (debt_in - cash_in)
-            return (eq / shares_in) if shares_in > 0 else 0
+        # 50/50 blend of Gordon and peer for sensitivity (conservative mix)
+        pv_tv_blend = 0.50 * pv_gordon + 0.50 * pv_peer
+        ev  = fcf_pv_sum + pv_tv_blend
+        eq  = ev - (debt_in - cash_in)
+        return (eq / shares_in) if shares_in > 0 else 0
 
-        wacc_range = [wacc - 0.01, wacc - 0.005, wacc, wacc + 0.005, wacc + 0.01]
-        ltg_range  = [ltg  - 0.005, ltg  - 0.0025, ltg, ltg  + 0.0025, ltg  + 0.005]
+    wacc_range = [wacc - 0.01, wacc - 0.005, wacc, wacc + 0.005, wacc + 0.01]
+    ltg_range  = [ltg  - 0.005, ltg  - 0.0025, ltg, ltg  + 0.0025, ltg  + 0.005]
 
-        sens_data = {}
-        for t_g in ltg_range:
-            sens_data[f"{t_g:.2%}"] = [quick_dcf_calc(w_r, t_g) for w_r in wacc_range]
+    sens_data = {}
+    for t_g in ltg_range:
+        sens_data[f"{t_g:.2%}"] = [quick_dcf_calc(w_r, t_g) for w_r in wacc_range]
 
-        df_sens = pd.DataFrame(sens_data, index=[f"{w:.1%}" for w in wacc_range])
-        df_sens.index.name = "WACC"
-        df_sens.columns.name = "Terminal Growth"
+    df_sens = pd.DataFrame(sens_data, index=[f"{w:.1%}" for w in wacc_range])
+    df_sens.index.name = "WACC"
+    df_sens.columns.name = "Terminal Growth"
 
-        def style_sens(val):
-            if val == 0: return 'background-color: gray; color: white;'
-            color = '#2a2a3e'
-            if val > cur_price * 1.1: color = '#105234'
-            elif val < cur_price * 0.9: color = '#4a151b'
-            return f'background-color: {color}; color: white; border: 1px solid #444;'
+    def style_sens(val):
+        if val == 0: return 'background-color: gray; color: white;'
+        color = '#2a2a3e'
+        if val > cur_price * 1.1: color = '#105234'
+        elif val < cur_price * 0.9: color = '#4a151b'
+        return f'background-color: {color}; color: white; border: 1px solid #444;'
 
-        st.dataframe(df_sens.style.format(f"{curr_symbol}{{:,.2f}}").map(style_sens), use_container_width=True)
+    st.dataframe(df_sens.style.format(f"{curr_symbol}{{:,.2f}}").map(style_sens), use_container_width=True)
 
 # TAB 4 — HISTORICAL FINANCIALS
 # Shows 4 years of actual revenue, EBIT margin, D&A, Capex, SBC, FCFF.
