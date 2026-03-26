@@ -1215,6 +1215,7 @@ except Exception as e:
     rev_mult_source   = "N/A"
     mult_source   = "N/A"
     sum_pv_final  = 0
+    tv_r = 0
     pv_tv_g = pv_tv_r = pv_tv_e = 0
 
 
