@@ -987,7 +987,13 @@ with st.sidebar:
         st.caption(f"⚠️ Distress premium: WACC +{stress_premium:.1%} (negative growth scenario)")
 
     m_def = (current_margin * 100)
-    margin_tgt = st.number_input("EBIT Margin %", value=float(f"{m_def * mult_m:.1f}"), step=0.5, format="%.1f", key=f"m_{ticker}_{scenario}_{st.session_state.reset_key}") / 100
+    st.markdown("**EBIT Margin Glide Path**")
+    margin_start = st.number_input("Current EBIT Margin % (Yr 0)", value=float(f"{m_def:.1f}"), step=0.5, format="%.1f",
+                                    help="Starting margin — auto-filled from financials. Edit if Yahoo data looks wrong.",
+                                    key=f"ms_{ticker}_{scenario}_{st.session_state.reset_key}") / 100
+    margin_tgt = st.number_input("Target EBIT Margin % (Yr 10)", value=float(f"{m_def * mult_m:.1f}"), step=0.5, format="%.1f",
+                                  help="Where you expect margins to be by Year 10. Default = current margin (flat). Move up for expansion, down for compression.",
+                                  key=f"m_{ticker}_{scenario}_{st.session_state.reset_key}") / 100
     tax_rate = st.number_input("Tax Rate %", value=float(f"{eff_tax_rate*100:.1f}"), step=1.0, format="%.1f", key=f"t_{ticker}_{scenario}_{st.session_state.reset_key}") / 100
     ltg = st.number_input("Terminal Growth %", value=2.5, step=0.1, format="%.1f", key=f"l_{ticker}_{scenario}_{st.session_state.reset_key}") / 100
     exit_mult = st.number_input("Exit Multiple (x)", value=def_mult * mult_e, step=0.5, format="%.1f", key=f"e_{ticker}_{scenario}_{st.session_state.reset_key}")
@@ -1072,7 +1078,9 @@ if r_in > 0:
             current_g = max(current_g, safe_ltg)
 
         rev   = prev_rev * (1 + current_g)
-        ebit  = rev * margin_tgt
+        # Margin glide path: interpolate linearly from margin_start (Y1) to margin_tgt (Y10)
+        current_margin_y = margin_start + (margin_tgt - margin_start) * ((y - 1) / 9)
+        ebit  = rev * current_margin_y
         nopat = ebit * (1 - tax_rate)
         da    = rev * dep_r
         capex = rev * cap_r
@@ -1121,7 +1129,7 @@ with tab_model:
         df_formatted,
         use_container_width=True,
         disabled=disabled_cols,
-        key=f"editor_{st.session_state.reset_key}_{g1:.4f}_{g2:.4f}_{margin_tgt:.4f}_{wacc:.4f}_{tax_rate:.4f}_{ltg:.4f}_{term_cap_ratio:.2f}_{nwc_r:.4f}_{sbc_r_fcf:.4f}"
+        key=f"editor_{st.session_state.reset_key}_{g1:.4f}_{g2:.4f}_{margin_start:.4f}_{margin_tgt:.4f}_{wacc:.4f}_{tax_rate:.4f}_{ltg:.4f}_{term_cap_ratio:.2f}_{nwc_r:.4f}_{sbc_r_fcf:.4f}"
     )
 
 # ==========================================
@@ -1443,7 +1451,8 @@ with tab_returns:
                             cg = g2_try + (safe_ltg_try - g2_try) * ((y - 6) / 4)
                             cg = max(cg, safe_ltg_try)
                         rv = prev_r * (1 + cg)
-                        eb = rv * margin_tgt; no = eb * (1 - tax_rate)
+                        cm_y = margin_start + (margin_tgt - margin_start) * ((y - 1) / 9)
+                        eb = rv * cm_y; no = eb * (1 - tax_rate)
                         da = rv * dep_r; cx = rv * cap_r
                         dn = (rv - prev_r) * nwc_r; sb = rv * sbc_r_fcf
                         pv_s += (no + da - cx - dn + sb) * ((1 + wacc)**(-(y - 0.5)))
@@ -1487,12 +1496,13 @@ with tab_returns:
     st.subheader("Sensitivity Analysis 🎯")
     st.caption("Implied Share Price based on WACC vs. Terminal Growth")
 
-    def quick_dcf_calc(w, t_g, r_in=r_in, g1=g1, g2=g2, margin_tgt=margin_tgt,
+    def quick_dcf_calc(w, t_g, r_in=r_in, g1=g1, g2=g2,
+                        margin_start=margin_start, margin_tgt=margin_tgt,
                         tax_rate=tax_rate, dep_r=dep_r, cap_r=cap_r, nwc_r=nwc_r,
                         sbc_r_fcf=sbc_r_fcf, term_cap_ratio=term_cap_ratio,
                         terminal_mult=terminal_mult,
                         debt_in=debt_in, cash_in=cash_in, shares_in=shares_in):
-        """Mirrors main model: two-phase growth, normalized terminal FCF,
+        """Mirrors main model: two-phase growth, margin glide path, normalized terminal FCF,
            blended Gordon (50%) + Peer EV/EBITDA (50%) terminal."""
         safe_t_g = min(t_g, w - 0.015)
         fcf_pv_sum = 0.0
@@ -1507,7 +1517,8 @@ with tab_returns:
                 current_g = g2 + (safe_t_g - g2) * ((y - 6) / 4)
                 current_g = max(current_g, safe_t_g)
             rev   = prev_rev * (1 + current_g)
-            ebit  = rev * margin_tgt
+            current_margin_y = margin_start + (margin_tgt - margin_start) * ((y - 1) / 9)
+            ebit  = rev * current_margin_y
             nopat = ebit * (1 - tax_rate)
             da    = rev * dep_r
             capex = rev * cap_r
