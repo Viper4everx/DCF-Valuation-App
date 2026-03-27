@@ -1635,7 +1635,13 @@ with tab_comp:
         peer_median_ebitda  = round(float(np.median(peer_ev_ebitda)),  1) if peer_ev_ebitda  else None
         peer_median_revenue = round(float(np.median(peer_ev_revenue)), 1) if peer_ev_revenue else None
 
-        def fmt_cell(v, suffix="x"): return f"{v}{suffix}" if v is not None else "N/A"
+        def fmt_cell(v, suffix="x"):
+            if v is None: return "N/A"
+            try:
+                if np.isnan(float(v)): return "N/A"
+            except (TypeError, ValueError):
+                pass
+            return f"{v}{suffix}"
         df_dc = df_comp.copy()
         df_dc['EV/EBITDA']  = df_comp['EV/EBITDA'].apply(lambda v: fmt_cell(v, "x"))
         df_dc['EV/Revenue'] = df_comp['EV/Revenue'].apply(lambda v: fmt_cell(v, "x")) if 'EV/Revenue' in df_comp.columns else "N/A"
