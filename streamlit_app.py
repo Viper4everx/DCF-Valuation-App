@@ -260,6 +260,18 @@ def get_yahoo_data(ticker):
 
         actual_ev_revenue = info.get('enterpriseToRevenue')
         if actual_ev_revenue is None or np.isnan(actual_ev_revenue): actual_ev_revenue = 0.0
+
+        actual_pe = info.get('trailingPE')
+        if actual_pe is not None:
+            try:
+                actual_pe = None if np.isnan(float(actual_pe)) else round(float(actual_pe), 1)
+            except: actual_pe = None
+
+        actual_mkt_cap = info.get('marketCap')
+        if actual_mkt_cap:
+            try:
+                actual_mkt_cap = None if np.isnan(float(actual_mkt_cap)) else round(float(actual_mkt_cap) / 1e9, 1)
+            except: actual_mkt_cap = None
         
         beta_raw = info.get('beta')
         
@@ -494,10 +506,10 @@ def get_yahoo_data(ticker):
         except Exception:
             comp_data = []
 
-        return data, price, shares, fx_msg, price_curr, industry, actual_ev_ebitda, actual_ev_revenue, last_date_str, hist_data, comp_data, company_name
+        return data, price, shares, fx_msg, price_curr, industry, actual_ev_ebitda, actual_ev_revenue, actual_pe, actual_mkt_cap, last_date_str, hist_data, comp_data, company_name
         
     except Exception as e:
-        return None, 0.0, 1.0, f"Connection Error: {str(e)}", "USD", "Unknown", None, None, "Unknown", [], [], ""
+        return None, 0.0, 1.0, f"Connection Error: {str(e)}", "USD", "Unknown", None, None, None, None, "Unknown", [], [], ""
 
 # ==========================================
 # SECTION 5 — INPUT SETUP & SESSION STATE
@@ -538,7 +550,7 @@ last_filing_date = "Unknown"
 if ticker:
     with st.spinner(f"Analysing {ticker}..."):
         if 'last_ticker' not in st.session_state or st.session_state.last_ticker != ticker:
-            d, cur_price, shares_def, fx_msg, currency, ind_name, ev_ebitda, ev_revenue, file_date, hist_data, comp_data, company_name = get_yahoo_data(ticker)
+            d, cur_price, shares_def, fx_msg, currency, ind_name, ev_ebitda, ev_revenue, pe_ratio, mkt_cap_b, file_date, hist_data, comp_data, company_name = get_yahoo_data(ticker)
             if d:
                 st.session_state.y0 = d
                 st.session_state.last_price = cur_price
@@ -549,6 +561,8 @@ if ticker:
                 st.session_state.industry = ind_name
                 st.session_state.ev_ebitda_actual = ev_ebitda
                 st.session_state.ev_revenue_actual = ev_revenue
+                st.session_state.pe_actual = pe_ratio
+                st.session_state.mkt_cap_actual = mkt_cap_b
                 st.session_state.file_date = file_date
                 st.session_state.hist_data = hist_data
                 st.session_state.comp_data = comp_data
@@ -1622,11 +1636,14 @@ with tab_comp:
         if ticker and cur_price > 0 and r_in > 0:
             ev_ebitda_self  = st.session_state.get('ev_ebitda_actual', None)
             ev_revenue_self = st.session_state.get('ev_revenue_actual', None)
+            pe_self      = st.session_state.get('pe_actual', None)
+            mktcap_self  = st.session_state.get('mkt_cap_actual', None)
             self_row = {
                 'Ticker': f"▶ {ticker}", 'Name': f"{ticker} (You)",
                 'EV/EBITDA':  round(ev_ebitda_self,  1) if ev_ebitda_self  and ev_ebitda_self  > 0 else None,
                 'EV/Revenue': round(ev_revenue_self, 1) if ev_revenue_self and ev_revenue_self > 0 else None,
-                'P/E': None, 'Mkt Cap $B': None,
+                'P/E':        pe_self,
+                'Mkt Cap $B': mktcap_self,
             }
             df_comp = pd.concat([pd.DataFrame([self_row]), df_comp], ignore_index=True)
 
