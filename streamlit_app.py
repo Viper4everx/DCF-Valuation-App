@@ -567,6 +567,8 @@ if ticker:
                 st.session_state.hist_data = hist_data
                 st.session_state.comp_data = comp_data
                 st.session_state.company_name = company_name
+                # Pre-populate peer input with auto-pulled tickers so user can edit/remove them
+                st.session_state['custom_peers_input'] = ', '.join([r['Ticker'] for r in comp_data])
                 st.session_state.reset_key += 1
             else:
                 st.error(f"Unable to fetch data: {fx_msg}")
@@ -1621,23 +1623,68 @@ with tab_hist:
         st.info("Enter a ticker above to load historical financials.")
 
 # TAB 5 — PEER COMPARABLES
-# Sector peers fetched in parallel during get_yahoo_data().
-# Table shows EV/EBITDA, EV/Revenue, P/E, market cap for up to 5 peers.
+# Auto peers fetched in parallel during get_yahoo_data().
+# User can also enter custom peer tickers which are fetched live.
+# Table shows EV/EBITDA, EV/Revenue, P/E, market cap for all peers.
 # Peer median badges for both multiples vs your exit assumptions.
 # These medians feed directly into Methods 2 and 3 of the valuation (Section 9).
 with tab_comp:
     comp_rows = st.session_state.get('comp_data', [])
-    if comp_rows:
+    if comp_rows or ticker:
         ind = st.session_state.get('industry', 'Unknown')
         st.subheader(f"Peer Comparables — {ind}")
-        st.caption("Sector peers pulled from Yahoo Finance. EV/EBITDA and EV/Revenue medians feed directly into the valuation model.")
 
-        df_comp = pd.DataFrame(comp_rows)
+        # ---- Editable peer list ----
+        custom_input = st.text_input(
+            "Peers (edit to remove or add tickers)",
+            value=st.session_state.get('custom_peers_input', ''),
+            placeholder="e.g. JNJ, PFE, SYK, MDT",
+            help="Auto-filled from Yahoo Finance. Delete any you don't want, add others. Medians update automatically."
+        )
+        st.session_state['custom_peers_input'] = custom_input
+
+        # Parse tickers from input — this is now the full peer list
+        all_tickers = [t.strip().upper() for t in custom_input.split(',') if t.strip()]
+        custom_rows = []
+        if all_tickers:
+            with st.spinner(f"Fetching {len(all_tickers)} peer(s)..."):
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                def fetch_custom_peer(pt):
+                    try:
+                        pi = yf.Ticker(pt).info
+                        if pi is None: return None
+                        ev_eb  = pi.get('enterpriseToEbitda')
+                        ev_rev = pi.get('enterpriseToRevenue')
+                        pe     = pi.get('trailingPE')
+                        name   = pi.get('shortName', pt)[:20]
+                        mktcap = pi.get('marketCap', 0) or 0
+                        def clean(v):
+                            try: return None if v is None or np.isnan(float(v)) or float(v) <= 0 else round(float(v), 1)
+                            except: return None
+                        return {
+                            'Ticker': pt, 'Name': name,
+                            'EV/EBITDA':  clean(ev_eb),
+                            'EV/Revenue': clean(ev_rev),
+                            'P/E':        clean(pe),
+                            'Mkt Cap $B': round(mktcap / 1e9, 1) if mktcap else None,
+                        }
+                    except: return None
+
+                with ThreadPoolExecutor(max_workers=5) as executor:
+                    futures = {executor.submit(fetch_custom_peer, pt): pt for pt in all_tickers[:8]}
+                    for future in as_completed(futures):
+                        result = future.result()
+                        if result: custom_rows.append(result)
+                custom_rows.sort(key=lambda r: all_tickers.index(r['Ticker']) if r['Ticker'] in all_tickers else 99)
+
+        merged_rows = custom_rows
+
+        df_comp = pd.DataFrame(merged_rows) if merged_rows else pd.DataFrame()
         if ticker and cur_price > 0 and r_in > 0:
             ev_ebitda_self  = st.session_state.get('ev_ebitda_actual', None)
             ev_revenue_self = st.session_state.get('ev_revenue_actual', None)
-            pe_self      = st.session_state.get('pe_actual', None)
-            mktcap_self  = st.session_state.get('mkt_cap_actual', None)
+            pe_self         = st.session_state.get('pe_actual', None)
+            mktcap_self     = st.session_state.get('mkt_cap_actual', None)
             self_row = {
                 'Ticker': f"▶ {ticker}", 'Name': f"{ticker} (You)",
                 'EV/EBITDA':  round(ev_ebitda_self,  1) if ev_ebitda_self  and ev_ebitda_self  > 0 else None,
@@ -1647,10 +1694,17 @@ with tab_comp:
             }
             df_comp = pd.concat([pd.DataFrame([self_row]), df_comp], ignore_index=True)
 
-        peer_ev_ebitda  = [r['EV/EBITDA']  for r in comp_rows if r.get('EV/EBITDA')]
-        peer_ev_revenue = [r['EV/Revenue']  for r in comp_rows if r.get('EV/Revenue')]
+        # Medians computed from ALL peers (auto + custom), excluding subject ticker
+        peer_ev_ebitda  = [r['EV/EBITDA']  for r in merged_rows if r.get('EV/EBITDA')]
+        peer_ev_revenue = [r['EV/Revenue']  for r in merged_rows if r.get('EV/Revenue')]
         peer_median_ebitda  = round(float(np.median(peer_ev_ebitda)),  1) if peer_ev_ebitda  else None
         peer_median_revenue = round(float(np.median(peer_ev_revenue)), 1) if peer_ev_revenue else None
+
+        if merged_rows or (ticker and cur_price > 0):
+            st.caption(f"{len(merged_rows)} peer(s) · Edit the field above to remove or add tickers · Medians feed directly into the valuation model.")
+        if not merged_rows and not (ticker and cur_price > 0):
+            st.info("Enter a ticker above to load peer comparables.")
+            st.stop()
 
         def fmt_cell(v, suffix="x"):
             if v is None: return "N/A"
@@ -1717,5 +1771,3 @@ with tab_comp:
                   </div>
                 </div>
                 """, unsafe_allow_html=True)
-    else:
-        st.info("Enter a ticker above to load peer comparables.")
