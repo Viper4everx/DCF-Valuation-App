@@ -567,7 +567,7 @@ if ticker:
                 st.session_state.hist_data = hist_data
                 st.session_state.comp_data = comp_data
                 st.session_state.company_name = company_name
-                # Pre-populate peer input with auto-pulled tickers so user can edit/remove them
+                # Reset peer input when ticker changes so it re-seeds from new comp_data
                 st.session_state['custom_peers_input'] = ', '.join([r['Ticker'] for r in comp_data])
                 st.session_state.reset_key += 1
             else:
@@ -1635,15 +1635,19 @@ with tab_comp:
         st.subheader(f"Peer Comparables — {ind}")
 
         # ---- Editable peer list ----
+        # Ensure session state is seeded from comp_data if not yet set for this ticker
+        if 'custom_peers_input' not in st.session_state or not st.session_state['custom_peers_input']:
+            st.session_state['custom_peers_input'] = ', '.join([r['Ticker'] for r in comp_rows])
+
         custom_input = st.text_input(
             "Peers (edit to remove or add tickers)",
-            value=st.session_state.get('custom_peers_input', ''),
             placeholder="e.g. JNJ, PFE, SYK, MDT",
-            help="Auto-filled from Yahoo Finance. Delete any you don't want, add others. Medians update automatically."
+            help="Auto-filled from Yahoo Finance. Delete any you don't want, add others. Medians update automatically.",
+            key='custom_peers_input'
         )
-        st.session_state['custom_peers_input'] = custom_input
 
         # Parse tickers from input — this is now the full peer list
+        custom_input = st.session_state.get('custom_peers_input', '')
         all_tickers = [t.strip().upper() for t in custom_input.split(',') if t.strip()]
         custom_rows = []
         if all_tickers:
